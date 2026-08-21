@@ -59,6 +59,7 @@ export default {
       outgoing: new Map(),
       mirrorTurn: 0,
       mirrorDetach: null,
+      mirrorPeer: null,
     }
 
     const uid = (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e12).toString(36)}`
@@ -183,6 +184,39 @@ export default {
       })
       await saveMailbox(mb)
     }
+
+    // ── human-in-the-loop: a message typed directly into the mirror session
+    // (a user/message whose id is NOT plugin-minted 'iflow-…') is routed to the
+    // session-bound peer so the operator participates in the agent↔agent
+    // conversation. The distinct "human vs agent" visual badge is the client
+    // side (ui-conversation MessageItem); here we do the participation/routing.
+    function eventText(d) {
+      try {
+        if (!d || !Array.isArray(d.content)) return ''
+        return d.content.map(b => (b && typeof b.text === 'string' ? b.text : '')).join('')
+      } catch (err) { return '' }
+    }
+    async function sendToPeer(peerName, prompt) {
+      const entry = resolvePeer(peerName)
+      if (!entry) return { ok: false, error: 'unknown peer' }
+      const rpc = (method, params) => curlPost(`${entry.url}/a2a`, { jsonrpc: '2.0', id: uid('req'), method, params }, 60, entry.token)
+      return rpc('SendMessage', {
+        message: { messageId: uid('msg'), role: 'ROLE_USER', parts: [{ text: prompt, mediaType: 'text/plain' }] },
+        configuration: { returnImmediately: true, historyLength: 0 },
+        metadata: { from: state.alias, machine: await getMachineName() },
+      })
+    }
+    ctx.on('session/event', (session, event) => {
+      try {
+        if (!session || session.id !== 'iflow-mirror') return
+        if (!event || event.type !== 'user/message') return
+        const d = event.data
+        if (!d || typeof d.id !== 'string' || d.id.startsWith('iflow-')) return // plugin-written
+        const text = eventText(d)
+        if (!text || !state.mirrorPeer) return
+        sendToPeer(state.mirrorPeer, text).then(() => {}).catch(() => {})
+      } catch (err) { /* best-effort */ }
+    })
 
     // side: 'self'   → this machine's own turn → user/message (renders RIGHT,
     //                  WeChat "me").     'remote' → the peer's turn →
@@ -641,6 +675,7 @@ export default {
       if (text.length === 0) throw rpcException(-32602, 'Invalid parameters', 'message.parts must contain at least one text or data part')
       const metadata = params && params.metadata && typeof params.metadata === 'object' ? params.metadata : {}
       const from = typeof metadata.from === 'string' && metadata.from.length > 0 ? metadata.from : undefined
+      if (from) state.mirrorPeer = from
       const taskId = `iflow-${uid('task')}`
       const contextId = typeof message.contextId === 'string' && message.contextId.length > 0 ? message.contextId : taskId
       const task = {
@@ -1379,6 +1414,7 @@ export default {
         async execute(args) {
           const entry = resolvePeer(args.peer)
           if (!entry) return { ok: false, peer: args.peer, error: `unknown peer or invalid URL: ${args.peer}` }
+          state.mirrorPeer = args.peer
           const base = entry.url
           const token = entry.token
           const rpc = (method, params) => curlPost(`${base}/a2a`, { jsonrpc: '2.0', id: uid('req'), method, params }, 60, token)
