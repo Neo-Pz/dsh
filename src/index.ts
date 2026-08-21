@@ -58,6 +58,7 @@ export default {
       tasks: new Map(),
       outgoing: new Map(),
       mirrorTurn: 0,
+      mirrorDetach: null,
     }
 
     const uid = (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e12).toString(36)}`
@@ -87,22 +88,67 @@ export default {
     // UI's required event sequence. If a stale subagent-origin 'iflow-mirror'
     // session from an earlier version still exists in the store, use a distinct
     // id ('iflow-mirror-ui') so the visible plain session is the one written. ──
-    function ensureMirror() {
+    async function ensureMirror() {
       try {
         const existing = ctx.sessions.get('iflow-mirror')
+        let id = 'iflow-mirror'
         if (existing) {
           const meta = existing.header && existing.header.meta ? existing.header.meta : {}
           if (!meta.origin || meta.origin !== 'subagent') return existing
+          id = 'iflow-mirror-ui'
         }
-        const id = existing ? 'iflow-mirror-ui' : 'iflow-mirror'
-        const session = ctx.sessions.create(id, { meta: { cwd: workspace } })
-        try { session.append('turn/start', { turn: 0 }) } catch (e) { /* ignore */ }
+        // Re-adopt the persisted conversation so history survives a retire;
+        // fall back to a fresh live session. `enter` returns a detach disposer
+        // we call after each write batch to retire the session (so the UI can
+        // resume it instead of failing "while it is live").
+        const persistence = ctx.get('sessionPersistence')
+        const canReadopt = !!(persistence && typeof persistence.prepare === 'function')
+        let session
+        let detach
+        if (canReadopt) {
+          try {
+            const prep = await persistence.prepare(id)
+            session = prep.session
+            detach = ctx.sessions.enter(session)
+          } catch (err) {
+            // Not persisted yet (first message) → build fresh; it will be
+            // persisted on append, so retiring is safe (next write re-adopts).
+            let fresh = ctx.sessions.get(id)
+            if (!fresh) {
+              fresh = ctx.sessions.prepare(id, { meta: { cwd: workspace } })
+              detach = ctx.sessions.enter(fresh)
+            } else {
+              detach = undefined
+            }
+            session = fresh
+          }
+        } else {
+          // No persistence provider → keep the session live (old behavior) so it
+          // still accumulates; never retire (nothing to re-adopt from).
+          let fresh = ctx.sessions.get(id)
+          if (!fresh) {
+            fresh = ctx.sessions.prepare(id, { meta: { cwd: workspace } })
+            ctx.sessions.enter(fresh)
+          }
+          session = fresh
+          detach = undefined
+        }
         try { ctx.sessionTitle.rename(session, 'iFlow · 双向镜像') } catch (e) { /* ignore */ }
+        if (detach) state.mirrorDetach = detach
+        else state.mirrorDetach = null
         return session
       } catch (err) {
         console.error('iFlow ensureMirror failed', err)
         return undefined
       }
+    }
+
+    // Free the live slot after a write batch so the mirror session becomes
+    // resumable from the durable log instead of failing "while it is live".
+    function retireMirror() {
+      try {
+        if (state.mirrorDetach) { state.mirrorDetach(); state.mirrorDetach = null }
+      } catch (err) { console.error('iFlow retireMirror failed', err) }
     }
 
     // side: 'self'   → this machine's own turn → user/message (renders RIGHT,
@@ -112,9 +158,9 @@ export default {
     //                  assistant/message left (MessageItem.cs style), so swapping
     //                  the roles relative to the A2A direction yields the WeChat
     //                  bubble layout: remote on the left, self on the right.
-    function mirrorAppend(side, text, label) {
+    async function mirrorAppend(side, text, label) {
       try {
-        const mirror = ensureMirror()
+        const mirror = await ensureMirror()
         if (!mirror) return
         const turn = state.mirrorTurn + 1
         const step = 1
@@ -142,6 +188,8 @@ export default {
         }
         mirror.append('step/end', { turn, step })
         state.mirrorTurn = turn
+        // Free the live slot so the user can reopen the mirror conversation.
+        retireMirror()
       } catch (err) {
         console.error('iFlow mirrorAppend failed', err)
       }
@@ -475,7 +523,7 @@ export default {
         presetId = undefined
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
-      mirrorAppend('remote', text, `[${from || 'remote'}]`)
+      await mirrorAppend('remote', text, `[${from || 'remote'}]`)
       const childId = `iflow-${uid('agent')}`
       let handle
       try {
@@ -546,7 +594,7 @@ export default {
           }]
         }
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
-        mirrorAppend('self', textOut, `[${state.alias}]`)
+        await mirrorAppend('self', textOut, `[${state.alias}]`)
       } else {
         setStatus(taskId, 'TASK_STATE_FAILED', 'The local agent produced no output.')
       }
@@ -1315,10 +1363,10 @@ export default {
           const result = response.result || {}
           const task = result.task
           // Mirror the outbound prompt (self → right, WeChat "me") once accepted.
-          try { mirrorAppend('self', args.prompt, `[${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
+          try { await mirrorAppend('self', args.prompt, `[${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
-            if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: text.length > 0, peer: args.peer, taskId: '', state: 'MESSAGE', text,
               ...(text.length === 0 ? { error: 'remote returned an empty message' } : {}),
@@ -1327,7 +1375,7 @@ export default {
           if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
           if (TERMINAL.has(task.status.state)) {
             const text = taskText(task)
-            if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
@@ -1356,7 +1404,7 @@ export default {
           }
           if (!TERMINAL.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
           const text = taskText(finalTask)
-          if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+          if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,
