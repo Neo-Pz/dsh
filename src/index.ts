@@ -151,6 +151,39 @@ export default {
       } catch (err) { console.error('iFlow retireMirror failed', err) }
     }
 
+    // ── offline mailbox: a persistent outbox/inbox queue so a message sent to
+    // a peer that is currently unreachable is held and redelivered on a later
+    // send attempt. Idempotent by (peer, prompt); deduped before enqueue. ──
+    const mailboxFile = path.join(workspace, '.iflow', 'mailbox.json')
+    async function loadMailbox() {
+      try {
+        const p = await ctx.fs.resolve(mailboxFile)
+        const raw = await ctx.fs.readText(p)
+        const data = JSON.parse(raw)
+        return {
+          outbox: Array.isArray(data.outbox) ? data.outbox : [],
+          inbox: Array.isArray(data.inbox) ? data.inbox : [],
+        }
+      } catch (err) {
+        return { outbox: [], inbox: [] }
+      }
+    }
+    async function saveMailbox(mb) {
+      try {
+        const p = await ctx.fs.resolve(mailboxFile)
+        await ctx.fs.writeText(p, JSON.stringify(mb, null, 2))
+      } catch (err) { console.error('iFlow saveMailbox failed', err) }
+    }
+    async function enqueueOut(peer, prompt) {
+      const mb = await loadMailbox()
+      if (mb.outbox.some(o => o.peer === peer && o.prompt === prompt && o.state !== 'delivered')) return
+      mb.outbox.push({
+        id: uid('mbox'), peer, prompt, taskId: '',
+        createdAt: Date.now(), attempts: 0, lastAttempt: 0, state: 'queued',
+      })
+      await saveMailbox(mb)
+    }
+
     // side: 'self'   → this machine's own turn → user/message (renders RIGHT,
     //                  WeChat "me").     'remote' → the peer's turn →
     //                  assistant/message (renders LEFT, WeChat "other"). The DSH
@@ -1349,6 +1382,25 @@ export default {
           const base = entry.url
           const token = entry.token
           const rpc = (method, params) => curlPost(`${base}/a2a`, { jsonrpc: '2.0', id: uid('req'), method, params }, 60, token)
+          // Offline mailbox: before sending, redeliver any queued messages for
+          // this peer. Best-effort; a still-unreachable peer leaves them queued.
+          try {
+            const mb = await loadMailbox()
+            let dirty = false
+            for (const item of mb.outbox) {
+              if (item.peer !== args.peer || item.state !== 'queued') continue
+              const r = await rpc('SendMessage', {
+                message: { messageId: uid('msg'), role: 'ROLE_USER', parts: [{ text: item.prompt, mediaType: 'text/plain' }] },
+                configuration: { returnImmediately: true, historyLength: 0 },
+                metadata: { from: state.alias, machine: await getMachineName() },
+              })
+              item.attempts += 1
+              item.lastAttempt = Date.now()
+              if (!r.error) item.state = 'delivered'
+              dirty = true
+            }
+            if (dirty) await saveMailbox(mb)
+          } catch (err) { /* mailbox flush is best-effort */ }
           let response
           try {
             response = await rpc('SendMessage', {
@@ -1357,7 +1409,9 @@ export default {
               metadata: { from: state.alias, machine: await getMachineName() },
             })
           } catch (err) {
-            return { ok: false, peer: args.peer, error: `SendMessage failed: ${String(err && err.message ? err.message : err)}` }
+            // Peer unreachable → hold the message in the persistent outbox.
+            try { await enqueueOut(args.peer, args.prompt) } catch (e) { /* best-effort */ }
+            return { ok: false, peer: args.peer, taskId: '', state: 'QUEUED', error: `peer offline; queued for redelivery: ${String(err && err.message ? err.message : err)}` }
           }
           if (response.error) return { ok: false, peer: args.peer, error: `remote error ${response.error.code}: ${response.error.message}` }
           const result = response.result || {}
