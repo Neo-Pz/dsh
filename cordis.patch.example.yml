@@ -1,0 +1,9 @@
+# Copy this example into an ignored Harness-local patch file, then replace the
+# placeholder with the absolute URL of the selected iFlow worktree. Loader
+# entry names are literal module specifiers, so a portable relative path is not
+# supported here.
+- insert:
+    - id: iflow
+      name: 'file:///ABSOLUTE/PATH/TO/iflow-dsh-plugin/src/index.ts'
+      config:
+        allowPeerUpdate: false

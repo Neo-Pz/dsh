@@ -15,6 +15,7 @@ Linux 基金会的 [Agent2Agent (A2A) 协议](https://github.com/a2aproject/A2A)
 | 文件 | 说明 |
 | --- | --- |
 | `src/index.ts` | 插件完整 Host 源码（Loader 直接加载的本体，v20） |
+| `cordis.patch.example.yml` | 复制到 Harness 的 `.local/patches/` 后填写绝对模块 URL 的启动 patch 示例 |
 | `.local/patches/iflow*.patch.yml` | Harness 工作区内的本机启动 patch（`--patch` 加载，稳定版和开发版各一份） |
 | `package.json` | 本地插件包声明（name/main/type） |
 | `README.md` | 本说明 |

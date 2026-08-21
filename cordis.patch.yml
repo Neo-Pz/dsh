@@ -1,6 +1,0 @@
-# iFlow local Cordis plugin — v20 (P4 token metering).
-# Loaded as an overlay via `pnpm dsh web --patch ./iflow-dsh-plugin/cordis.patch.yml`.
-# The plugin path MUST be absolute (a patch does not change the loader base dir).
-- insert:
-    - id: iflow
-      name: 'file:///F:/i_Flow_One/deepseek-harness/iflow-dsh-plugin/src/index.ts'
