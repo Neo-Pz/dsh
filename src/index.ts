@@ -249,7 +249,7 @@ export default {
               id: `iflow-${uid('m')}`,
               role: 'assistant',
               content,
-              source: { kind: 'assistant' },
+              source: { kind: 'model', provider: 'iflow', model: 'remote' },
             },
           }, { surfaceOp: 'append' })
         }
