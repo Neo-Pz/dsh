@@ -590,7 +590,7 @@ export default {
         presetId = undefined
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
-      await mirrorAppend('remote', text, `[${from || 'remote'}]`)
+      await mirrorAppend('remote', text, `[agent:${from || 'remote'}]`)
       const childId = `iflow-${uid('agent')}`
       let handle
       try {
@@ -661,7 +661,7 @@ export default {
           }]
         }
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
-        await mirrorAppend('self', textOut, `[${state.alias}]`)
+        await mirrorAppend('self', textOut, `[agent:${state.alias}]`)
       } else {
         setStatus(taskId, 'TASK_STATE_FAILED', 'The local agent produced no output.')
       }
@@ -1453,10 +1453,10 @@ export default {
           const result = response.result || {}
           const task = result.task
           // Mirror the outbound prompt (self → right, WeChat "me") once accepted.
-          try { await mirrorAppend('self', args.prompt, `[${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
+          try { await mirrorAppend('self', args.prompt, `[agent:${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
-            if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await mirrorAppend('remote', text, `[agent:${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: text.length > 0, peer: args.peer, taskId: '', state: 'MESSAGE', text,
               ...(text.length === 0 ? { error: 'remote returned an empty message' } : {}),
@@ -1465,7 +1465,7 @@ export default {
           if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
           if (TERMINAL.has(task.status.state)) {
             const text = taskText(task)
-            if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await mirrorAppend('remote', text, `[agent:${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
