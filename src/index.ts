@@ -185,6 +185,57 @@ export default {
       await saveMailbox(mb)
     }
 
+    // ── peer registry persistence: registrations are DURABLE state (name/url/
+    // token/addedAt), like OpenIM keeps users/friends in a durable store; the
+    // runtime health fields (healthy/lastSeen) are EPHEMERAL and never written,
+    // like OpenIM's Redis presence. Mirrors the mailbox.json pattern so the
+    // registry survives restarts (and queued outbox items can be redelivered). ──
+    const peersFile = join(workspace, '.iflow', 'peers.json')
+    async function loadPeers() {
+      try {
+        const p = await ctx.fs.resolve(peersFile)
+        const data = JSON.parse(await ctx.fs.readText(p))
+        const map = new Map()
+        for (const item of Array.isArray(data.peers) ? data.peers : []) {
+          if (!item || typeof item.name !== 'string' || !item.name || typeof item.url !== 'string') continue
+          map.set(item.name, {
+            url: item.url,
+            token: typeof item.token === 'string' && item.token.length > 0 ? item.token : null,
+            addedAt: typeof item.addedAt === 'string' ? item.addedAt : iso(),
+          })
+        }
+        return map
+      } catch (err) {
+        return new Map()
+      }
+    }
+    async function savePeers() {
+      try {
+        const p = await ctx.fs.resolve(peersFile)
+        const peers = [...state.peers.entries()].map(([name, entry]) => ({
+          name, url: entry.url, token: entry.token, addedAt: entry.addedAt,
+        }))
+        await ctx.fs.writeText(p, JSON.stringify({ peers }, null, 2))
+      } catch (err) { console.error('iFlow savePeers failed', err) }
+    }
+    // Load the persisted registry at boot; add/remove await this promise so the
+    // first mutation never clobbers the on-disk list mid-load.
+    const peersReady = loadPeers().then((map) => { state.peers = map }).catch(() => {})
+    // Startup health probe: stamp in-memory healthy/lastSeen on each entry
+    // (never persisted — presence is a snapshot, not an asset).
+    async function probePeer(name, entry) {
+      try {
+        await curlGet(`${entry.url}/.well-known/agent-card.json`, 8, entry.token !== null ? entry.token : state.token)
+        entry.healthy = true
+      } catch (err) {
+        entry.healthy = false
+      }
+      entry.lastSeen = Date.now()
+    }
+    peersReady.then(() => {
+      for (const [name, entry] of state.peers) probePeer(name, entry)
+    }).catch(() => {})
+
     // ── human-in-the-loop: a message typed directly into the mirror session
     // (a user/message whose id is NOT plugin-minted 'iflow-…') is routed to the
     // session-bound peer so the operator participates in the agent↔agent
@@ -1063,6 +1114,8 @@ export default {
         name: { type: 'string', required: true },
         url: { type: 'string', required: true },
         tokenSet: { type: 'boolean', required: true },
+        healthy: { type: 'boolean' },
+        lastSeen: { type: 'integer' },
       },
     }
 
@@ -1096,7 +1149,7 @@ export default {
           },
           render: (_args, value) => [{
             type: 'text',
-            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  mirror session: ${value.mirrorSession}\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}`,
+            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  mirror session: ${value.mirrorSession}\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}`,
           }],
         },
         async execute() {
@@ -1118,7 +1171,7 @@ export default {
             updateEndpoint: `${base}/iflow/version.json`,
             mirrorSession: mirrorState,
             authEnabled: state.token !== null,
-            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null })),
+            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen })),
             activeTasks: [...state.tasks.values()].filter((t) => !TERMINAL.has(t.status.state)).length,
           }
         },
@@ -1169,9 +1222,13 @@ export default {
           render: (_args, value) => [{ type: 'text', text: `peer ${value.name} → ${value.url} (${value.tokenSet ? 'token set' : 'no token'})` }],
         },
         async execute(args) {
+          await peersReady
+          const name = args.name.trim()
           const url = args.url.trim().replace(/\/+$/, '')
-          state.peers.set(args.name.trim(), { url, token: typeof args.token === 'string' && args.token.length > 0 ? args.token : null })
-          return { ok: true, name: args.name.trim(), url, tokenSet: state.peers.get(args.name.trim()).token !== null }
+          state.peers.set(name, { url, token: typeof args.token === 'string' && args.token.length > 0 ? args.token : null, addedAt: iso() })
+          await savePeers()
+          probePeer(name, state.peers.get(name))
+          return { ok: true, name, url, tokenSet: state.peers.get(name).token !== null }
         },
       }),
 
@@ -1190,13 +1247,13 @@ export default {
           },
           render: (_args, value) => [{
             type: 'text',
-            text: value.peers.length === 0 ? 'no peers registered' : value.peers.map((p) => `- ${p.name} → ${p.url}${p.tokenSet ? ' (token)' : ''}`).join('\n'),
+            text: value.peers.length === 0 ? 'no peers registered' : value.peers.map((p) => `- ${p.name} → ${p.url}${p.tokenSet ? ' (token)' : ''}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('\n'),
           }],
         },
         async execute() {
           return {
             ok: true,
-            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null })),
+            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen })),
           }
         },
       }),
@@ -1219,7 +1276,9 @@ export default {
           render: (_args, value) => [{ type: 'text', text: `peer ${value.name} ${value.ok ? 'removed' : 'not found'}` }],
         },
         async execute(args) {
+          await peersReady
           const removed = state.peers.delete(args.name.trim())
+          await savePeers()
           return { ok: removed, name: args.name.trim() }
         },
       }),
