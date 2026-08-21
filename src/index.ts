@@ -155,7 +155,7 @@ export default {
     // ── offline mailbox: a persistent outbox/inbox queue so a message sent to
     // a peer that is currently unreachable is held and redelivered on a later
     // send attempt. Idempotent by (peer, prompt); deduped before enqueue. ──
-    const mailboxFile = path.join(workspace, '.iflow', 'mailbox.json')
+    const mailboxFile = join(workspace, '.iflow', 'mailbox.json')
     async function loadMailbox() {
       try {
         const p = await ctx.fs.resolve(mailboxFile)
