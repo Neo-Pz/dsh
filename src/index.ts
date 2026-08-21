@@ -1777,7 +1777,8 @@ export default {
               if (typeof args.durationMs === 'number') rec.push('--duration', String(args.durationMs))
               const out = await iflowId(rec, 20)
               const fpMatch = /fingerprint: (\S+)/.exec(out)
-              return { ok: true, fingerprint: fpMatch ? fpMatch[1] : null, tasks: 1, totalCost: null }
+              const costMatch = /cost \$([0-9.]+)/.exec(out)
+              return { ok: true, fingerprint: fpMatch ? fpMatch[1] : null, tasks: 1, totalCost: costMatch ? Number(costMatch[1]) : 0 }
             }
             if (action === 'report') {
               const rep = ['usage', 'report']
