@@ -105,7 +105,14 @@ export default {
       }
     }
 
-    function mirrorAppend(kind, text, label) {
+    // side: 'self'   → this machine's own turn → user/message (renders RIGHT,
+    //                  WeChat "me").     'remote' → the peer's turn →
+    //                  assistant/message (renders LEFT, WeChat "other"). The DSH
+    //                  conversation UI aligns user/message right and
+    //                  assistant/message left (MessageItem.cs style), so swapping
+    //                  the roles relative to the A2A direction yields the WeChat
+    //                  bubble layout: remote on the left, self on the right.
+    function mirrorAppend(side, text, label) {
       try {
         const mirror = ensureMirror()
         if (!mirror) return
@@ -114,7 +121,7 @@ export default {
         mirror.append('turn/start', { turn })
         mirror.append('step/start', { turn, step })
         const content = [{ type: 'text', text: `${label} ${text}` }]
-        if (kind === 'user') {
+        if (side === 'self') {
           mirror.append('user/message', {
             id: `iflow-${uid('m')}`,
             role: 'user',
@@ -468,7 +475,7 @@ export default {
         presetId = undefined
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
-      mirrorAppend('user', text, `[${from || 'remote'}]`)
+      mirrorAppend('remote', text, `[${from || 'remote'}]`)
       const childId = `iflow-${uid('agent')}`
       let handle
       try {
@@ -539,7 +546,7 @@ export default {
           }]
         }
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
-        mirrorAppend('assistant', textOut, `[${state.alias}]`)
+        mirrorAppend('self', textOut, `[${state.alias}]`)
       } else {
         setStatus(taskId, 'TASK_STATE_FAILED', 'The local agent produced no output.')
       }
@@ -1307,8 +1314,11 @@ export default {
           if (response.error) return { ok: false, peer: args.peer, error: `remote error ${response.error.code}: ${response.error.message}` }
           const result = response.result || {}
           const task = result.task
+          // Mirror the outbound prompt (self → right, WeChat "me") once accepted.
+          try { mirrorAppend('self', args.prompt, `[${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
+            if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: text.length > 0, peer: args.peer, taskId: '', state: 'MESSAGE', text,
               ...(text.length === 0 ? { error: 'remote returned an empty message' } : {}),
@@ -1317,6 +1327,7 @@ export default {
           if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
           if (TERMINAL.has(task.status.state)) {
             const text = taskText(task)
+            if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
@@ -1345,6 +1356,7 @@ export default {
           }
           if (!TERMINAL.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
           const text = taskText(finalTask)
+          if (text.length > 0) try { mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,
