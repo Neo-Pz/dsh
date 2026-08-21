@@ -17,6 +17,7 @@ Linux 基金会的 [Agent2Agent (A2A) 协议](https://github.com/a2aproject/A2A)
 | `src/index.ts` | 插件完整 Host 源码（Loader 直接加载的本体，v20） |
 | `cordis.patch.example.yml` | 复制到 Harness 的 `.local/patches/` 后填写绝对模块 URL 的启动 patch 示例 |
 | `.local/patches/iflow*.patch.yml` | Harness 工作区内的本机启动 patch（`--patch` 加载，稳定版和开发版各一份） |
+| `DEVELOPMENT.md` | 本地开发、验证、发布和回滚流程 |
 | `package.json` | 本地插件包声明（name/main/type） |
 | `README.md` | 本说明 |
 | `DESIGN.md` | iFlowOne 设计文档（信任根 P1 / 委托 P2 / 经济 P3 路线） |
@@ -32,8 +33,10 @@ cd F:\i_Flow_One\deepseek-harness
 pnpm dsh web --patch ./.local/patches/iflow.patch.yml --no-open --port 0
 ```
 
-`cordis.patch.yml` 里的插件路径是 `file:///F:/i_Flow_One/...` 形式（Windows 下 ESM loader 必须用
+`.local/patches/iflow.patch.yml` 里的插件路径是 `file:///F:/i_Flow_One/...` 形式（Windows 下 ESM loader 必须用
 `file://` URL），插件行 `id: iflow` 会出现在 Web 的「设置 → 插件」列表，状态「已挂载」。
+
+维护流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 > 若 3080 被占（`listen EACCES`），先用随机端口确认无冲突：`pnpm dsh web --patch ... --port 0`，
 > 从日志读取实际端口，再换回固定端口正式启动。
