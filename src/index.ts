@@ -1778,7 +1778,18 @@ export default {
               const out = await iflowId(rec, 20)
               const fpMatch = /fingerprint: (\S+)/.exec(out)
               const costMatch = /cost \$([0-9.]+)/.exec(out)
-              return { ok: true, fingerprint: fpMatch ? fpMatch[1] : null, tasks: 1, totalCost: costMatch ? Number(costMatch[1]) : 0 }
+              const tokMatch = /: (\d+) tokens \(in (\d+), out (\d+), cr (\d+), cw (\d+)\)/.exec(out)
+              return {
+                ok: true,
+                fingerprint: fpMatch ? fpMatch[1] : null,
+                tasks: 1,
+                tokens: tokMatch ? Number(tokMatch[1]) : 0,
+                inputTokens: tokMatch ? Number(tokMatch[2]) : 0,
+                outputTokens: tokMatch ? Number(tokMatch[3]) : 0,
+                cacheReadTokens: tokMatch ? Number(tokMatch[4]) : 0,
+                cacheWriteTokens: tokMatch ? Number(tokMatch[5]) : 0,
+                totalCost: costMatch ? Number(costMatch[1]) : 0,
+              }
             }
             if (action === 'report') {
               const rep = ['usage', 'report']
