@@ -1,5 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
@@ -382,9 +383,9 @@ export default {
     // existing "binary not found" path.
     async function fetchIflowIdBinary() {
       try {
-        if (process.platform !== 'win32') {
-          await ctx.subprocess.spawn({ argv: ['mkdir', '-p', IFI_BIN_DIR], cwd: workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } } }).done
-        }
+        // Ensure the target dir exists on every OS (Node's mkdirSync creates the
+        // full parent chain; plain cmd/`mkdir` would not on Windows).
+        mkdirSync(IFI_BIN_DIR, { recursive: true })
         const dest = join(IFI_BIN_DIR, IFI_BIN_NAME)
         const dl = ctx.subprocess.spawn({ argv: ['curl', '-sSL', '-m', '120', '-o', dest, IFI_BIN_URL], cwd: workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } } })
         const out = await dl.done
