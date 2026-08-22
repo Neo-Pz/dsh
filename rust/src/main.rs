@@ -2,7 +2,9 @@
 //!
 //! Zero-chain identity & request-signing reference implementation:
 //!   create            generate & persist a did:key identity
-//!   show              print the public identity (never the secret)
+//!   show [--json]     print the public identity (never the secret)
+//!   sign-blob <file>  detached Ed25519 signature over a file's exact bytes
+//!   verify-blob <file> <signature> <did>   verify such a signature
 //!   sign <method> <path> <body>   build a signed request envelope
 //!   verify <json>     verify a signed request envelope
 //!   agentcard-sign <card.json>    sign an AgentCard (JWS)
@@ -26,6 +28,7 @@ mod pricing;
 mod signing;
 mod usage;
 
+use base64::Engine as _;
 use std::collections::HashMap;
 use std::io::Read;
 
@@ -59,7 +62,9 @@ fn main() {
     }
     let result = match args[1].as_str() {
         "create" => cmd_create(&args[2..]),
-        "show" => cmd_show(),
+        "show" => cmd_show(&args[2..]),
+        "sign-blob" => cmd_sign_blob(&args[2..]),
+        "verify-blob" => cmd_verify_blob(&args[2..]),
         "sign" => cmd_sign(&args[2..]),
         "sign-file" => cmd_sign_file(&args[2..]),
         "verify" => cmd_verify(&args[2..]),
@@ -163,8 +168,22 @@ fn load_identity() -> Result<StoredIdentity, String> {
         .ok_or_else(|| "no identity yet; run `iflow-id create` first".to_string())
 }
 
-fn cmd_show() -> Result<(), String> {
+fn cmd_show(args: &[String]) -> Result<(), String> {
     let identity = load_identity()?;
+
+    // Machine-readable output exists so callers stop scraping the human text
+    // below with regular expressions — a format nobody promised to keep.
+    if args.iter().any(|a| a == "--json") {
+        let out = serde_json::json!({
+            "did": identity.did,
+            "label": identity.label,
+            "storage": identity.storage,
+            "publicKey": hex(&identity.signing_key()?.verifying_key().to_bytes()),
+        });
+        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+
     println!("did:      {}", identity.did);
     println!("label:    {}", identity.label);
     println!("created:  {}", identity.created_at);
@@ -173,6 +192,53 @@ fn cmd_show() -> Result<(), String> {
         "public key: {}",
         hex(&identity.signing_key()?.verifying_key().to_bytes())
     );
+    Ok(())
+}
+
+/// Sign a file's exact bytes, detached.
+///
+/// Unlike `sign` and `sign-file`, this imposes NO envelope of its own: the
+/// caller decides what the bytes mean. That is what an event journal needs —
+/// the canonical form of an event is settled by `iflow-protocol`, and the
+/// signer must not wrap it in a second, different structure.
+fn cmd_sign_blob(args: &[String]) -> Result<(), String> {
+    let file = match args {
+        [f] => f.clone(),
+        _ => return Err("usage: iflow-id sign-blob <file>".into()),
+    };
+    let bytes = std::fs::read(&file).map_err(|e| format!("cannot read {file}: {e}"))?;
+    let identity = load_identity()?;
+    let signing = identity.signing_key()?;
+    let signature = identity::did_key::sign(&signing, &bytes);
+    let out = serde_json::json!({
+        "alg": "EdDSA",
+        "signerDid": identity.did,
+        "signature": agentcard::base64url(&signature),
+    });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Verify a detached signature over a file's exact bytes.
+///
+/// Exits non-zero on any failure so a caller can branch on the exit code alone,
+/// and also prints the verdict as JSON for callers that read stdout.
+fn cmd_verify_blob(args: &[String]) -> Result<(), String> {
+    let (file, signature, did) = match args {
+        [f, s, d] => (f.clone(), s.clone(), d.clone()),
+        _ => return Err("usage: iflow-id verify-blob <file> <signature> <did>".into()),
+    };
+    let bytes = std::fs::read(&file).map_err(|e| format!("cannot read {file}: {e}"))?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(signature.as_bytes())
+        .map_err(|e| format!("signature is not base64url: {e}"))?;
+    let sig: [u8; 64] = raw
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+
+    DidKey(did.clone()).verify(&bytes, &sig)?;
+    let out = serde_json::json!({ "ok": true, "signerDid": did });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
     Ok(())
 }
 
