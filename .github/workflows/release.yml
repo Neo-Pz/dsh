@@ -35,7 +35,7 @@ jobs:
           # The repo's rust/.cargo/config.toml pins HTTP_PROXY to 127.0.0.1 for the
           # author's machine; CI has no such proxy, so drop that line and let cargo
           # reach crates.io directly. Sed available on all three runner OSes.
-          if [ -f .cargo/config.toml ]; then sed -i '/proxy/d' .cargo/config.toml; fi
+          if [ -f .cargo/config.toml ]; then sed -i.bak '/proxy/d' .cargo/config.toml; fi
           cargo build --release
       - name: Upload artifact
         uses: actions/upload-artifact@v4
