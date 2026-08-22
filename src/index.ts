@@ -1156,6 +1156,8 @@ export default {
           const base = state.publicUrl || `http://127.0.0.1:${webServer.port}`
           let mirrorState = 'none'
           try { mirrorState = ctx.sessions.get('iflow-mirror') ? 'created' : 'absent' } catch (e) { /* ignore */ }
+          // Refresh each peer's reachability so the report is current, not stale.
+          for (const [name, entry] of state.peers) await probePeer(name, entry)
           return {
             ok: true,
             name: state.name,
