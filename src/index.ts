@@ -369,17 +369,45 @@ export default {
     // plugin worktree; its store stays under <workspace>/.iflow so it remains
     // inside the sandbox's writable root. ──
     let iflowIdResolved = null
+    const IFI_BIN_DIR = join(pluginRoot, 'rust', 'target', 'release')
+    const IFI_BIN_NAME = process.platform === 'win32' ? 'iflow-id.exe' : 'iflow-id'
+    const IFI_BIN_URL = process.platform === 'win32'
+      ? 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-windows-amd64.exe'
+      : process.platform === 'darwin'
+        ? 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-darwin-amd64'
+        : 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-linux-amd64'
+    // One-click convenience: when the CI-built binary is missing (fresh npm/git
+    // install), fetch it from the GitHub Release. Best-effort; local installs
+    // that already have the binary never reach this. Errors fall through to the
+    // existing "binary not found" path.
+    async function fetchIflowIdBinary() {
+      try {
+        if (process.platform !== 'win32') {
+          await ctx.subprocess.spawn({ argv: ['mkdir', '-p', IFI_BIN_DIR], cwd: workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } } }).done
+        }
+        const dest = join(IFI_BIN_DIR, IFI_BIN_NAME)
+        const dl = ctx.subprocess.spawn({ argv: ['curl', '-sSL', '-m', '120', '-o', dest, IFI_BIN_URL], cwd: workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } } })
+        const out = await dl.done
+        return out.exitCode === 0
+      } catch (err) {
+        console.error('iFlow iflow-id auto-fetch failed', err)
+        return false
+      }
+    }
     async function resolveIflowId() {
       if (iflowIdResolved !== null) return iflowIdResolved
-      const candidates = [
-        join(pluginRoot, 'rust', 'target', 'release', process.platform === 'win32' ? 'iflow-id.exe' : 'iflow-id'),
-      ]
-      for (const cand of candidates) {
-        try {
+      const cand = join(IFI_BIN_DIR, IFI_BIN_NAME)
+      try {
+        const resolved = await ctx.subprocess.resolveExecutable(cand)
+        if (resolved) { iflowIdResolved = resolved; return iflowIdResolved }
+      } catch (e) { /* try next */ }
+      // Fresh install with no binary: fetch the CI-built one (one-click).
+      try {
+        if (await fetchIflowIdBinary()) {
           const resolved = await ctx.subprocess.resolveExecutable(cand)
           if (resolved) { iflowIdResolved = resolved; return iflowIdResolved }
-        } catch (e) { /* try next */ }
-      }
+        }
+      } catch (e) { /* leave false */ }
       iflowIdResolved = false
       return iflowIdResolved
     }
