@@ -4,7 +4,8 @@
 // fetch, and no local Rust build. Best-effort: on failure it logs a warning
 // and exits 0 so the install still succeeds (the plugin's runtime auto-fetch
 // then serves as the fallback).
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -21,14 +22,14 @@ const url = `https://github.com/Neo-Pz/dsh/releases/latest/download/${asset}`
 
 try {
   console.log(`[iflow] fetching ${asset} ...`)
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const buf = Buffer.from(await res.arrayBuffer())
   mkdirSync(destDir, { recursive: true })
-  writeFileSync(dest, buf)
-  console.log(`[iflow] wrote ${dest} (${buf.length} bytes)`)
+  // curl (like the plugin's runtime auto-fetch) so proxies/TLS get honored; the
+  // plugin also uses curl for outbound requests, so this is the proven path.
+  execFileSync('curl', ['-sSL', '--retry', '3', '-m', '120', '-o', dest, url], { stdio: 'inherit' })
+  const size = (await import('node:fs')).statSync(dest).size
+  console.log(`[iflow] wrote ${dest} (${size} bytes)`)
 } catch (err) {
   // Best-effort: don't fail the install; runtime auto-fetch will retry.
   console.warn(`[iflow] could not pre-fetch ${asset}: ${String(err && err.message ? err.message : err)}`)
-  console.warn(`[iflow] the plugin will try to fetch it on first use.`)
+  console.warn('[iflow] the plugin will try to fetch it on first use.')
 }
