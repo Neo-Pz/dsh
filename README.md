@@ -38,14 +38,27 @@ pnpm dsh web --patch ./.local/patches/iflow.patch.yml --no-open --port 0
 
 维护流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-## 一键安装（GitHub 发布后）
+## 一键安装（GitHub）
 
-iFlow 可发布为 GitHub 上的 **`dsh-plugin`**，走标准生态一键安装：
+iFlow 已发布为公开的 **`dsh-plugin`**：[Neo-Pz/dsh](https://github.com/Neo-Pz/dsh)。
+`.github/workflows/release.yml` 在每次 `v*` tag 推送时自动构建三平台 `iflow-id` 并挂到 Release —— **使用者无需本地 Rust**。
 
-1. **公开仓库**：`iflow-dsh-plugin` 推到 GitHub，打 `dsh-plugin` topic。
-2. **原生二进制免装**：`.github/workflows/release.yml` 在每次 `v*` tag 推送时构建 `iflow-id`（Windows/macOS/Linux）并挂到对应 GitHub Release —— 使用者**无需本地 Rust**。
-3. **装载入口**：把 `cordis.patch.example.yml` 的 `name` 从 `file://...` 换成发布仓库入口（或经 `dsh-plugin` 市场安装）。
-4. 完整一键命令见发布后的 release 说明。
+```powershell
+# 1. 取仓库 + 免装原生二进制（从最新 Release 拉对应平台的 iflow-id）
+git clone https://github.com/Neo-Pz/dsh.git iflow-dsh-plugin
+#    下载 https://github.com/Neo-Pz/dsh/releases/latest 里：
+#      Windows -> iflow-id-windows-amd64.exe  (放到 rust/target/release/iflow-id.exe)
+#      Linux   -> iflow-id-linux-amd64
+#      macOS   -> iflow-id-darwin-amd64
+
+# 2. 装载：把 cordis.patch.example.yml 的 name 指向克隆下来的 src/index.ts，然后
+cd F:\i_Flow_One\deepseek-harness
+pnpm dsh web --patch ./.local/patches/iflow.patch.yml --no-open --port 0
+```
+
+> DSH 的 loader 装载入口是模块说明符（file:// 或已发布的 GitHub URL）。若你的 DSH 支持从
+> GitHub URL 装载，可把 `name` 直接写成 `https://raw.githubusercontent.com/Neo-Pz/dsh/<TAG>/src/index.ts`
+> （否则用 file:// 指到本地克隆路径）。
 
 > 若 3080 被占（`listen EACCES`），先用随机端口确认无冲突：`pnpm dsh web --patch ... --port 0`，
 > 从日志读取实际端口，再换回固定端口正式启动。
