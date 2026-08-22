@@ -1,7 +1,22 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { installIFlowEdge } from './edge/install.js'
+import { normalizeAction, validCapabilityId } from './a2a/capability.js'
+import {
+  TERMINAL_TASK_STATES,
+  blocksToText,
+  errorInfo,
+  eventText,
+  foldOutput,
+  messageText,
+  partsText,
+  rpcException,
+  rpcResult,
+  taskText,
+} from './a2a/protocol.js'
+import { signingDigest, simpleHash } from './util/hash.js'
 
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
 const sourcePath = fileURLToPath(import.meta.url)
@@ -63,18 +78,19 @@ export default {
       mirrorPeer: null,
     }
 
+    // Scratch files handed to the iflow-id binary (Windows argv has a length
+    // limit, so bodies travel as files). They used to sit in the workspace ROOT
+    // as .iflow-*-tmp.json, where they show up in the user's project and in
+    // `git status`; they belong under .iflow with the rest of iFlow's state.
+    const scratchDir = `${workspace}/.iflow/tmp`
+    const scratchPath = (name) => {
+      try { mkdirSync(scratchDir, { recursive: true }) } catch (e) { /* already there */ }
+      return `${scratchDir}/${name}`
+    }
+
     const uid = (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e12).toString(36)}`
     const iso = () => new Date().toISOString()
-    const TERMINAL = new Set(['TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_REJECTED'])
 
-    function simpleHash(text) {
-      let h = 0x811c9dc5
-      for (let i = 0; i < text.length; i++) {
-        h ^= text.charCodeAt(i)
-        h = (h * 0x01000193) >>> 0
-      }
-      return h.toString(16)
-    }
 
     async function readSource() {
       try {
@@ -242,12 +258,6 @@ export default {
     // session-bound peer so the operator participates in the agent↔agent
     // conversation. The distinct "human vs agent" visual badge is the client
     // side (ui-conversation MessageItem); here we do the participation/routing.
-    function eventText(d) {
-      try {
-        if (!d || !Array.isArray(d.content)) return ''
-        return d.content.map(b => (b && typeof b.text === 'string' ? b.text : '')).join('')
-      } catch (err) { return '' }
-    }
     async function sendToPeer(peerName, prompt) {
       const entry = resolvePeer(peerName)
       if (!entry) return { ok: false, error: 'unknown peer' }
@@ -330,7 +340,7 @@ export default {
               const path = url.replace(/^https?:\/\/[^/]+/, '')
               // Write the body to a temp file first: passing 30KB+ as an argv
               // element hits ENAMETOOLONG on Windows, so sign from file.
-              const bodyPath = `${workspace}/.iflow-body-tmp.json`
+              const bodyPath = scratchPath('body.json')
               const resolvedBody = await ctx.fs.resolve(bodyPath)
               await ctx.fs.writeText(resolvedBody, bodyText)
               const envelope = await iflowId(['sign-file', method, path, bodyPath], 20)
@@ -434,11 +444,12 @@ export default {
     let identityCache = null
     async function getIdentity() {
       if (identityCache) return identityCache
+      // `show --json` is a promised shape; the human output this used to scrape
+      // with a regular expression was not.
       try {
-        const out = await iflowId(['show'])
-        const did = /did:\s+(did:key:\S+)/.exec(out)
-        if (did) {
-          identityCache = { did: did[1], label: state.alias, present: true }
+        const parsed = JSON.parse(await iflowId(['show', '--json']))
+        if (parsed && typeof parsed.did === 'string') {
+          identityCache = { did: parsed.did, label: parsed.label ?? state.alias, present: true }
           return identityCache
         }
       } catch (e) { /* fall through */ }
@@ -505,21 +516,6 @@ export default {
       return typeof header === 'string' && header === `Bearer ${state.token}`
     }
 
-    function rpcResult(id, result) { return { jsonrpc: '2.0', id, result } }
-    function rpcError(id, code, message, data) {
-      const error = { code, message }
-      if (data !== undefined) error.data = data
-      return { jsonrpc: '2.0', id: id === undefined ? null : id, error }
-    }
-    function rpcException(code, message, data) {
-      const err = new Error(message)
-      err.rpcCode = code
-      err.rpcData = data
-      return err
-    }
-    function errorInfo(reason) {
-      return [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason, domain: 'a2a-protocol.org' }]
-    }
 
     async function agentCard(hostHeader) {
       const base = (state.publicUrl || `http://${hostHeader}`).replace(/\/+$/, '')
@@ -566,41 +562,8 @@ export default {
       return out
     }
 
-    function messageText(message) {
-      if (!message || !Array.isArray(message.parts)) return ''
-      const chunks = []
-      for (const part of message.parts) {
-        if (!part || typeof part !== 'object') continue
-        if (typeof part.text === 'string') chunks.push(part.text)
-        else if (part.data !== undefined) chunks.push(JSON.stringify(part.data))
-        else if (typeof part.url === 'string') chunks.push(part.url)
-      }
-      return chunks.join('\n')
-    }
 
-    function foldOutput(events) {
-      let last
-      const partial = []
-      for (const event of events) {
-        if (event && event.type === 'assistant/message') {
-          const content = event.data && event.data.message ? event.data.message.content : undefined
-          if (Array.isArray(content) && content.length > 0) last = content
-        } else if (event && event.type === 'assistant/chunk' && event.data && event.data.chunk
-          && event.data.chunk.type === 'text-delta' && typeof event.data.chunk.text === 'string') {
-          partial.push(event.data.chunk.text)
-        }
-      }
-      if (last !== undefined) return last
-      const text = partial.join('')
-      return text.length > 0 ? [{ type: 'text', text }] : []
-    }
 
-    function blocksToText(blocks) {
-      return blocks
-        .filter((b) => b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string')
-        .map((b) => b.text)
-        .join('\n')
-    }
 
     // ── P4 token metering: sum TokenUsage across a child's assistant messages.
     // DSH already emits per-message TokenUsage (input/output/cacheRead/
@@ -653,21 +616,43 @@ export default {
       const agentOptions = selection && selection.provider && selection.model
         ? { provider: selection.provider, model: selection.model }
         : {}
+      // Inbound remote agents must run under a restricted preset (workspace fs
+      // only, no shell/subagents/web). This used to fall back to `standard`
+      // when `remote-a2a` was missing — and it is missing on every DSH install
+      // today, so every remote peer silently received the FULL local toolset
+      // (fs/bash/pwsh/skill). That is a remote-code-execution surface, so the
+      // path now fails closed: no restricted preset, no inbound execution.
+      //
+      // Two deliberate escapes, both explicit:
+      //   config.inboundPreset            — name a different restricted preset
+      //   config.allowUnrestrictedInbound — restore the old permissive behavior
+      const wantedPreset = config.inboundPreset || 'remote-a2a'
       let presetId
       try {
-        // Inbound remote agents run under the restricted `remote-a2a` preset
-        // (workspace fs only, no shell/subagents/web). Fall back to `standard`
-        // when the preset is not installed (e.g. on a peer that hasn't
-        // deployed it yet).
+        const preset = await ctx.agentPresets.resolve(wantedPreset)
+        presetId = preset && preset.id ? preset.id : undefined
+        // A resolve that answers without a usable id confines nothing, so it
+        // is treated exactly like a missing preset rather than trusted.
+        if (!presetId) throw new Error(`preset '${wantedPreset}' resolved without an id`)
+      } catch (err) {
+        if (config.allowUnrestrictedInbound !== true) {
+          const detail = `No '${wantedPreset}' agent preset is installed, so this node cannot confine an inbound remote task. ` +
+            `Install a restricted preset with that id, point config.inboundPreset at one, ` +
+            `or set config.allowUnrestrictedInbound: true to accept the risk of granting remote peers the full local toolset.`
+          console.error(`iFlow: refusing an inbound A2A task — ${detail}`)
+          setStatus(taskId, 'TASK_STATE_REJECTED', detail)
+          return
+        }
+        console.warn(
+          `iFlow: '${wantedPreset}' preset missing and allowUnrestrictedInbound is on — ` +
+          'this inbound remote task gets the full local toolset.',
+        )
         try {
-          const preset = await ctx.agentPresets.resolve('remote-a2a')
-          presetId = preset && preset.id ? preset.id : undefined
-        } catch (err) {
           const preset = await ctx.agentPresets.resolve('standard')
           presetId = preset && preset.id ? preset.id : undefined
+        } catch (fallbackErr) {
+          presetId = undefined
         }
-      } catch (err) {
-        presetId = undefined
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
       await mirrorAppend('remote', text, `[agent:${from || 'remote'}]`)
@@ -679,8 +664,10 @@ export default {
           meta: { cwd: workspace, origin: 'subagent', ...(presetId ? { agentPreset: presetId } : {}) },
           agentOptions,
           signal: controller.signal,
-          // Mount the standard preset inside the creation window so the child
-          // gets the full local toolset (fs/bash/pwsh/skill), not just iFlow.
+          // Mount the resolved preset inside the creation window so the child's
+          // toolset is decided before it can run anything. Which preset that is
+          // was settled above, and an unconfined child never gets this far
+          // unless the operator explicitly allowed it.
           setup: async (agentCtx) => {
             if (presetId) await ctx.agentPresets.mount(agentCtx, presetId)
           },
@@ -781,6 +768,14 @@ export default {
         },
       }
       state.tasks.set(taskId, task)
+      observeEdge('a2a.request_received', (observer) =>
+        observer.a2aRequestReceived({
+          remoteTaskId: taskId,
+          fromLabel: from,
+          fromDid: signerDid || undefined,
+          grantRef: grant ? grant.grantId : undefined,
+        }),
+      )
       const controller = makeAbortController()
       state.outgoing.set(taskId, { controller, done: undefined })
       const done = runChild(taskId, text, controller, from)
@@ -802,7 +797,7 @@ export default {
       const taskId = params && typeof params.id === 'string' ? params.id : undefined
       const task = taskId ? state.tasks.get(taskId) : undefined
       if (!task) throw rpcException(-32001, 'Task not found', errorInfo('TASK_NOT_FOUND'))
-      if (TERMINAL.has(task.status.state)) throw rpcException(-32002, 'Task is not cancelable', errorInfo('TASK_NOT_CANCELABLE'))
+      if (TERMINAL_TASK_STATES.has(task.status.state)) throw rpcException(-32002, 'Task is not cancelable', errorInfo('TASK_NOT_CANCELABLE'))
       const entry = state.outgoing.get(taskId)
       if (entry) {
         entry.controller.abort(new Error('canceled by client'))
@@ -874,7 +869,7 @@ export default {
         const id = await ensureIdentity()
         if (!id.did) { signedCardCache = { at: Date.now(), value: { ok: false, error: 'no identity' } }; return signedCardCache.value }
         const card = await agentCard(hostHeader)
-        const tmp = `${workspace}/.iflow-card-tmp.json`
+        const tmp = scratchPath('card.json')
         const resolved = await ctx.fs.resolve(tmp)
         await ctx.fs.writeText(resolved, JSON.stringify(card))
         const jwsText = await iflowId(['agentcard-sign', tmp], 20)
@@ -916,7 +911,7 @@ export default {
       try { envelope = JSON.parse(header) } catch (e) { return { ok: false, did: null, error: 'bad envelope json' } }
       if (!envelope || typeof envelope !== 'object' || !envelope.signature || !envelope.signer) return { ok: false, did: null, error: 'incomplete envelope' }
       try {
-        const envPath = `${workspace}/.iflow-env-tmp.json`
+        const envPath = scratchPath('env.json')
         const resolved = await ctx.fs.resolve(envPath)
         await ctx.fs.writeText(resolved, JSON.stringify(envelope))
         await iflowId(['verify', envPath], 20)
@@ -964,7 +959,7 @@ export default {
       if (!validCapabilityId(action)) return { ok: false, reason: `invalid capability action: ${rawAction}` }
       const level = payload.level || 'L0'
       const now = Math.floor(Date.now() / 1000)
-      const grantPath = `${workspace}/.iflow-grant-tmp.json`
+      const grantPath = scratchPath('grant.json')
       const resolved = await ctx.fs.resolve(grantPath)
       await ctx.fs.writeText(resolved, JSON.stringify(grant))
       await iflowId(['grant', 'verify', grantPath], 20)
@@ -988,63 +983,11 @@ export default {
 
     // Ruling #2: a capability ID must be a namespace-prefixed `iflow.cap:<domain>.<op>`
     // (or `*` / a `ns.*` wildcard); bare free-form is rejected.
-    function validCapabilityId(id) {
-      if (id === '*') return true
-      if (typeof id !== 'string' || !id.startsWith('iflow.cap:')) return false
-      const rest = id.slice('iflow.cap:'.length)
-      const seg = rest.endsWith('.*') ? rest.slice(0, rest.length - 2) : rest
-      if (!seg) return false
-      return seg.split('.').every((part) => part.length > 0 && /^[a-z0-9_-]+$/.test(part))
-    }
 
     // Map the V19 default action to the V20 baseline capability ID.
-    function normalizeAction(action) {
-      if (action === 'agent-task') return 'iflow.cap:agent.run'
-      return action
-    }
 
     // Pure JS SHA-256 hex (FIPS 180-4) for body digest comparison — the
     // dynamic sandbox has no Web Crypto, and we only need the digest here.
-    function signingDigest(text) {
-      const bytes = new TextEncoder().encode(text)
-      const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]
-      const H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]
-      const ml = bytes.length * 8
-      const withOne = new Uint8Array(bytes.length + 1)
-      withOne.set(bytes)
-      withOne[bytes.length] = 0x80
-      let paddedLen = withOne.length + 8
-      while (paddedLen % 64 !== 0) paddedLen++
-      const padded = new Uint8Array(paddedLen)
-      padded.set(withOne)
-      const dv = new DataView(padded.buffer)
-      dv.setUint32(paddedLen - 8, Math.floor(ml / 0x100000000), false)
-      dv.setUint32(paddedLen - 4, ml >>> 0, false)
-      const rot = (x, n) => (x >>> n) | (x << (32 - n))
-      for (let i = 0; i < paddedLen; i += 64) {
-        const w = new Array(64)
-        for (let j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false)
-        for (let j = 16; j < 64; j++) {
-          const s0 = rot(w[j - 15], 7) ^ rot(w[j - 15], 18) ^ (w[j - 15] >>> 3)
-          const s1 = rot(w[j - 2], 17) ^ rot(w[j - 2], 19) ^ (w[j - 2] >>> 10)
-          w[j] = (w[j - 16] + s0 + w[j - 7] + s1) >>> 0
-        }
-        let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7]
-        for (let j = 0; j < 64; j++) {
-          const S1 = rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)
-          const ch = (e & f) ^ (~e & g)
-          const t1 = (h + S1 + ch + K[j] + w[j]) >>> 0
-          const S0 = rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)
-          const maj = (a & b) ^ (a & c) ^ (b & c)
-          const t2 = (S0 + maj) >>> 0
-          h = g; g = f; f = e; e = (d + t1) >>> 0
-          d = c; c = b; b = a; a = (t1 + t2) >>> 0
-        }
-        H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0
-        H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0
-      }
-      return H.map((x) => x.toString(16).padStart(8, '0')).join('')
-    }
 
     const a2aHandler = async (req, res) => {
       try {
@@ -1113,26 +1056,7 @@ export default {
       return undefined
     }
 
-    function partsText(parts) {
-      if (!Array.isArray(parts)) return ''
-      const chunks = []
-      for (const part of parts) {
-        if (!part || typeof part !== 'object') continue
-        if (typeof part.text === 'string') chunks.push(part.text)
-        else if (part.data !== undefined) chunks.push(JSON.stringify(part.data))
-        else if (typeof part.url === 'string') chunks.push(part.url)
-      }
-      return chunks.join('\n')
-    }
 
-    function taskText(task) {
-      const fromArtifacts = task.artifacts && task.artifacts.length > 0
-        ? task.artifacts.map((a) => partsText(a.parts)).filter((t) => t.length > 0).join('\n\n')
-        : ''
-      if (fromArtifacts) return fromArtifacts
-      const statusMessage = task.status && task.status.message ? task.status.message : undefined
-      return statusMessage ? partsText(statusMessage.parts) : ''
-    }
 
     async function sleep(ms) { await ctx.timeout(ms) }
 
@@ -1146,6 +1070,13 @@ export default {
         healthy: { type: 'boolean' },
         lastSeen: { type: 'integer' },
       },
+    }
+
+    // `render` must be pure and replay-safe, so this is a plain formatter over
+    // the value the tool already returned.
+    function renderWarnings(warnings) {
+      if (!Array.isArray(warnings) || warnings.length === 0) return ''
+      return `\n\nwarnings:\n${warnings.map((w) => `  ! ${w}`).join('\n')}`
     }
 
     const tools = [
@@ -1174,11 +1105,12 @@ export default {
               authEnabled: { type: 'boolean' },
               peers: { type: 'array', items: peerItem },
               activeTasks: { type: 'integer' },
+              warnings: { type: 'array', items: { type: 'string' } },
             },
           },
           render: (_args, value) => [{
             type: 'text',
-            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  mirror session: ${value.mirrorSession}\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}`,
+            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  mirror session: ${value.mirrorSession}\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}${renderWarnings(value.warnings)}`,
           }],
         },
         async execute() {
@@ -1187,7 +1119,27 @@ export default {
           try { mirrorState = ctx.sessions.get('iflow-mirror') ? 'created' : 'absent' } catch (e) { /* ignore */ }
           // Refresh each peer's reachability so the report is current, not stale.
           for (const [name, entry] of state.peers) await probePeer(name, entry)
+
+          // Surface the secrets sitting in the clear. These files are excluded
+          // from git, but an exclusion is not encryption, and an operator who
+          // never opens .iflow/ has no other way to learn this.
+          const warnings = []
+          const identity = await getIdentity()
+          if (identity.present) {
+            warnings.push('.iflow/identity.json holds this node\'s Ed25519 private key unencrypted (storage: plaintext-dev). Treat the workspace as secret material.')
+          }
+          if ([...state.peers.values()].some((entry) => entry.token !== null)) {
+            warnings.push('.iflow/peers.json stores peer bearer tokens in plaintext.')
+          }
+          if (webServer.host === '0.0.0.0') {
+            warnings.push(
+              'This node binds 0.0.0.0, so its A2A and projection endpoints are reachable from the LAN' +
+              (state.token === null ? ' WITH NO BEARER TOKEN SET.' : '.'),
+            )
+          }
+
           return {
+            warnings,
             ok: true,
             name: state.name,
             version: state.version,
@@ -1203,7 +1155,7 @@ export default {
             mirrorSession: mirrorState,
             authEnabled: state.token !== null,
             peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen })),
-            activeTasks: [...state.tasks.values()].filter((t) => !TERMINAL.has(t.status.state)).length,
+            activeTasks: [...state.tasks.values()].filter((t) => !TERMINAL_TASK_STATES.has(t.status.state)).length,
           }
         },
       }),
@@ -1553,7 +1505,7 @@ export default {
             }
           }
           if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
-          if (TERMINAL.has(task.status.state)) {
+          if (TERMINAL_TASK_STATES.has(task.status.state)) {
             const text = taskText(task)
             if (text.length > 0) try { await mirrorAppend('remote', text, `[agent:${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
             return {
@@ -1569,7 +1521,7 @@ export default {
           const deadline = Date.now() + maxWait * 1000
           let stateName = task.status.state
           let finalTask = task
-          while (!TERMINAL.has(stateName) && Date.now() < deadline) {
+          while (!TERMINAL_TASK_STATES.has(stateName) && Date.now() < deadline) {
             await sleep(2000)
             try {
               const poll = await rpc('GetTask', { id: task.id })
@@ -1582,7 +1534,7 @@ export default {
               return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `GetTask failed: ${String(err && err.message ? err.message : err)}` }
             }
           }
-          if (!TERMINAL.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
+          if (!TERMINAL_TASK_STATES.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
           const text = taskText(finalTask)
           if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
           return {
@@ -1688,7 +1640,7 @@ export default {
               const signed = JSON.parse(text)
               const jws = signed && signed.jws ? signed.jws : signed
               if (!jws || !jws.signer) return { ok: false, error: 'peer did not return a signed AgentCard (needs v18+)' }
-              const tmp = `${workspace}/.iflow-peer-card-tmp.json`
+              const tmp = scratchPath('peer-card.json')
               const resolved = await ctx.fs.resolve(tmp)
               await ctx.fs.writeText(resolved, JSON.stringify(jws))
               await iflowId(['agentcard-verify', tmp], 20)
@@ -1869,6 +1821,26 @@ export default {
               const fpMatch = /fingerprint: (\S+)/.exec(out)
               const costMatch = /cost \$([0-9.]+)/.exec(out)
               const tokMatch = /: (\d+) tokens \(in (\d+), out (\d+), cr (\d+), cw (\d+)\)/.exec(out)
+
+              // Metering is a fact about a Task, so it belongs in the Journal
+              // rather than only in a private ledger. Cost travels as integer
+              // micro-units: the canonical form rejects floats so that two
+              // languages can sign the same bytes.
+              observeEdge('usage.recorded', (observer) =>
+                observer.usageRecorded({
+                  taskId: args.taskId,
+                  model: args.model,
+                  tokens: {
+                    input: args.inputTokens,
+                    output: args.outputTokens,
+                    cacheRead: typeof args.cacheReadTokens === 'number' ? args.cacheReadTokens : 0,
+                    cacheWrite: typeof args.cacheWriteTokens === 'number' ? args.cacheWriteTokens : 0,
+                  },
+                  costMicros: Math.round((costMatch ? Number(costMatch[1]) : 0) * 1e6),
+                  priceSource: 'pricing.json',
+                }),
+              )
+
               return {
                 ok: true,
                 fingerprint: fpMatch ? fpMatch[1] : null,
@@ -1919,13 +1891,63 @@ export default {
       if (typeof grant === 'string' && !grant.trimStart().startsWith('{')) {
         text = await ctx.fs.readText(await ctx.fs.resolve(grant))
       }
-      const p = `${workspace}/.iflow-grant-tool-tmp.json`
+      const p = scratchPath('grant-tool.json')
       const resolved = await ctx.fs.resolve(p)
       await ctx.fs.writeText(resolved, text)
       return p
     }
 
     for (const tool of tools) ctx.tools.register(tool)
+
+    // ── iFlow edge (Origin Journal + Local Projection + read API) ──────────
+    // Additive: it observes DSH and journals facts. The A2A bridge, mirror,
+    // grants and metering above are untouched, and a failure to start the
+    // edge degrades observability without taking the bridge down with it.
+    // The edge starts asynchronously, so anything that wants to journal a fact
+    // goes through here: before it is ready the fact is simply not observed,
+    // which must never be allowed to break the A2A or metering path itself.
+    let edgeHandle = null
+    function observeEdge(what, use) {
+      if (!edgeHandle) return
+      try {
+        const result = use(edgeHandle.edge.observer)
+        if (result && typeof result.catch === 'function') {
+          result.catch((err) => console.error(`iFlow: could not journal ${what}`, err))
+        }
+      } catch (err) {
+        console.error(`iFlow: could not journal ${what}`, err)
+      }
+    }
+    void (async () => {
+      try {
+        const identity = await getIdentity()
+        edgeHandle = await installIFlowEdge(ctx, {
+          workspace,
+          alias: state.alias,
+          version: state.syncVersion,
+          did: identity.did,
+          token: state.token,
+          capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
+          // The edge signs through the same binary the rest of the plugin uses,
+          // so there is exactly one place that holds key material.
+          runIflowId: (args) => iflowId(args),
+          writeScratch: async (name, bytes) => {
+            const path = scratchPath(name)
+            writeFileSync(path, Buffer.from(bytes))
+            return path
+          },
+          allowedOrigins: config.hubOrigins ?? ['http://127.0.0.1:5174', 'http://localhost:5174'],
+          // Both default to off: a Hub can read this node's projections out of
+          // the box, but it cannot cause work here until an operator says so.
+          acceptCommands: config.acceptCommands === true,
+          routeApprovals: config.routeApprovals === true,
+        })
+        console.log(`iFlow edge ready: node ${edgeHandle.nodeId}, journal .iflow/edge/origin.ndjson, projections on /iflow/projection/*`)
+      } catch (err) {
+        console.error('iFlow edge failed to start (A2A bridge is unaffected):', err && err.message ? err.message : err)
+      }
+    })()
+    ctx.effect(() => () => { if (edgeHandle) edgeHandle.dispose() })
 
     console.log(`iFlow A2A bridge ready (v${state.syncVersion}): /a2a on port ${webServer.port}, alias ${state.alias}, mirror on, update source ${sourcePath}, auth ${state.token === null ? 'off' : 'on'}`)
   },

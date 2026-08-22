@@ -11,8 +11,9 @@
     "README.md"
   ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/dsh-tools --external:@deepseek-ai/dsh-llm --external:@deepseek-ai/dsh-session --external:@deepseek-ai/cordis --outfile=lib/index.js",
-    "prepare": "node scripts/fetch-iflow-id.mjs"
+    "build": "node scripts/build.mjs",
+    "prepare": "node scripts/fetch-iflow-id.mjs",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "dsh": {
     "bundle": {
