@@ -1,9 +1,14 @@
-# Copy this example into an ignored Harness-local patch file, then replace the
-# placeholder with the absolute URL of the selected iFlow worktree. Loader
-# entry names are literal module specifiers, so a portable relative path is not
-# supported here.
+# iFlow loader entry, two forms.
+#
+# LOCAL (dev/self): keep using a literal file:// path to the selected worktree.
+#   name: 'file:///ABSOLUTE/PATH/TO/iflow-dsh-plugin/src/index.ts'
+#
+# GITHUB ONE-CLICK (once the repo is public): point the entry at the published
+# repo. The native `iflow-id` binary is built by GitHub Actions (see
+# .github/workflows/release.yml) and attached to the v* Release — fetch the one
+# matching your OS from the latest release; no local Rust build needed.
 - insert:
     - id: iflow
-      name: 'file:///ABSOLUTE/PATH/TO/iflow-dsh-plugin/src/index.ts'
+      name: 'https://raw.githubusercontent.com/<OWNER>/iflow-dsh-plugin/<TAG>/src/index.ts'
       config:
         allowPeerUpdate: false

@@ -1,0 +1,53 @@
+name: release
+
+# Build the Rust `iflow-id` identity binary for the three OSes on every tag
+# push (v*) and attach it to the matching GitHub Release. This is what lets a
+# user get a prebuilt binary with "one-click install" instead of building Rust.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            bin: iflow-id.exe
+            asset: iflow-id-windows-amd64.exe
+          - os: ubuntu-latest
+            bin: iflow-id
+            asset: iflow-id-linux-amd64
+          - os: macos-latest
+            bin: iflow-id
+            asset: iflow-id-darwin-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build iflow-id (release)
+        working-directory: rust
+        run: cargo build --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: rust/target/release/${{ matrix.bin }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach binaries to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

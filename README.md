@@ -38,6 +38,15 @@ pnpm dsh web --patch ./.local/patches/iflow.patch.yml --no-open --port 0
 
 维护流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
+## 一键安装（GitHub 发布后）
+
+iFlow 可发布为 GitHub 上的 **`dsh-plugin`**，走标准生态一键安装：
+
+1. **公开仓库**：`iflow-dsh-plugin` 推到 GitHub，打 `dsh-plugin` topic。
+2. **原生二进制免装**：`.github/workflows/release.yml` 在每次 `v*` tag 推送时构建 `iflow-id`（Windows/macOS/Linux）并挂到对应 GitHub Release —— 使用者**无需本地 Rust**。
+3. **装载入口**：把 `cordis.patch.example.yml` 的 `name` 从 `file://...` 换成发布仓库入口（或经 `dsh-plugin` 市场安装）。
+4. 完整一键命令见发布后的 release 说明。
+
 > 若 3080 被占（`listen EACCES`），先用随机端口确认无冲突：`pnpm dsh web --patch ... --port 0`，
 > 从日志读取实际端口，再换回固定端口正式启动。
 
