@@ -1,0 +1,7 @@
+# iFlow bundle patch — mounts the A2A bridge plugin as a profile layer.
+# Declared by package.json's dsh.bundle.patch: installing the package via
+# `dsh plugin --profile web add github:Neo-Pz/dsh` reconciles it into
+# dsh.profile.bundles and this layer is applied automatically.
+- insert:
+  - id: iflow
+    name: iflow-dsh-plugin
