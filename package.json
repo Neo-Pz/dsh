@@ -2,6 +2,7 @@
   "name": "iflow-dsh-plugin",
   "version": "0.1.1",
   "description": "iFlow A2A bridge for DeepSeek Harness (v20: P1 trust root + P2 delegation + P4 token metering).",
+  "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "files": [
