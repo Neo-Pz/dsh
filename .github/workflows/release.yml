@@ -37,11 +37,15 @@ jobs:
           # reach crates.io directly. Sed available on all three runner OSes.
           if [ -f .cargo/config.toml ]; then sed -i.bak '/proxy/d' .cargo/config.toml; fi
           cargo build --release
+      - name: Rename binary to platform asset name
+        working-directory: rust
+        shell: bash
+        run: cp target/release/${{ matrix.bin }} ${{ matrix.asset }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: rust/target/release/${{ matrix.bin }}
+          path: rust/${{ matrix.asset }}
           if-no-files-found: error
 
   release:
