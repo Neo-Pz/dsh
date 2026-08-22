@@ -10,17 +10,19 @@
 | `deepseek-harness\.local\plugins\iflow-dev` | `dev` 最新提交的 detached worktree | 否 |
 | `deepseek-harness\.local\plugins\iflow` | 已确认 tag 的 detached worktree | 否 |
 | `deepseek-harness\.iflow` | 身份、撤销记录和计价状态 | 仅由运行时写入 |
-| `F:\i_Flow_One\iflowone` | iFlow 核心包（domain / protocol / adapter-sdk） | 是，但那是另一个仓库 |
+| `F:\i_Flow_One\iflowone` | iFlow 核心包源码（已发布到 npm，构建不再需要它） | 是，但那是另一个仓库 |
 
 `.local/` 和 `.iflow/` 由 `deepseek-harness/.git/info/exclude` 排除，不进入公共 Harness 仓库的状态或历史。
 
 ## 构建：现在是必需步骤
 
-插件不再是可以直接被加载的单文件。`src/index.ts` 依赖 `iflow-adapter-sdk` 等
-核心包，而它们**不在 package.json 里**——它们由 `scripts/build.mjs` 在构建时从
-兄弟仓库 `../iflowone/packages/*` 打包进 `lib/index.js`。这样做是为了让
-`dsh plugin add github:Neo-Pz/dsh` 这条安装路径保持不变：使用者拿到的是已经构建
-好的 `lib/index.js`，既不需要兄弟仓库，也不需要额外依赖。
+插件不再是可以直接被加载的单文件。`src/index.ts` 依赖 `iflow-adapter-sdk` 等核心
+包，它们是 **devDependencies**（已发布在 npm 上），由 `scripts/build.mjs` 在构建时
+打包进 `lib/index.js`。声明成 dev 依赖是因为构建把它们内联了：使用者拿到的是已经
+构建好的 `lib/index.js`，运行时不解析任何 iFlow 包，`dsh plugin add github:Neo-Pz/dsh`
+这条安装路径保持不变。
+
+要针对核心包里尚未发布的改动开发，用 `npm link`。
 
 代价是：**loader 必须指向 `lib/index.js`，不能再指向 `src/index.ts`**。裸的
 `iflow-adapter-sdk` 说明符在 `file://` 直载 TypeScript 的场景下无法解析。
@@ -28,6 +30,7 @@
 ```powershell
 # 每次改完 TS 源码都要重新构建
 cd F:\i_Flow_One\iflow-dsh-plugin
+npm install                    # 首次，或依赖变动后
 node scripts\build.mjs
 npm test                       # 41 个测试，直接跑构建产物与真实 iflow-id
 ```
@@ -86,10 +89,10 @@ curl http://127.0.0.1:<port>/iflow/edge/status
 curl http://127.0.0.1:<port>/iflow/projection/network
 ```
 
-7. 把 iFlowOne Web 接到这个边缘上：在 `F:\i_Flow_One\iflowone\apps\iflowone-web\.env`
-   里设 `VITE_IFLOW_SOURCE=edge` 与 `VITE_IFLOW_EDGE_URL=http://127.0.0.1:<port>`，
-   然后 `pnpm -C F:\i_Flow_One\iflowone dev:web`，打开 `/agents` 与 `/network`。
-   页头的徽标应从 `mock feed` 变成 `live edge`。
+7. 把 iFlowOne Web 接到这个边缘上。Web 应用在私有仓库 `iFlowOne-iFO` 里：在
+   `<iflowone-ifo>\apps\iflowone-web\.env` 设 `VITE_IFLOW_SOURCE=edge` 与
+   `VITE_IFLOW_EDGE_URL=http://127.0.0.1:<port>`，然后 `pnpm -C <iflowone-ifo> dev`，
+   打开 `/agents` 与 `/network`。页头的徽标应从 `mock feed` 变成 `live edge`。
 
 ## 发布
 

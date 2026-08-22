@@ -1,18 +1,21 @@
 /**
  * Build `lib/index.js`, the file DSH actually loads.
  *
- * Two things make this more than a one-line esbuild call:
+ * Two rules govern what gets bundled and what does not:
  *
- * 1. The four `@deepseek-ai/*` packages stay EXTERNAL. DSH resolves them from
- *    the installation's single instance; bundling a second copy of cordis
- *    would give the plugin its own service registry and it would see nothing.
+ * 1. The `@deepseek-ai/*` packages stay EXTERNAL. DSH resolves them from the
+ *    installation's single instance; bundling a second copy of cordis would
+ *    give the plugin its own service registry, and it would then see none of
+ *    the services it injects.
  *
- * 2. The three iFlow core packages are BUNDLED from the sibling `iflowone`
- *    repository. They are build-time only: consumers install this plugin from
- *    git and get the prebuilt `lib/index.js`, so they never need the sibling
- *    checkout or an extra dependency. Declaring them in package.json would
- *    break exactly that install path, which is why they are resolved by an
- *    alias plugin here instead.
+ * 2. The iFlow core packages are BUNDLED. They are ordinary devDependencies
+ *    resolved from node_modules, so a fresh clone builds with nothing but
+ *    `npm install`. They are dev-only because the build inlines them: a
+ *    consumer installing this plugin from git gets the prebuilt `lib/index.js`
+ *    and never resolves them at runtime.
+ *
+ * To work against un-released changes in the core packages, `npm link` them —
+ * that is what the tool is for, and it beats a bespoke path override here.
  */
 
 import { existsSync } from 'node:fs'
@@ -22,32 +25,20 @@ import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const corePackagesRoot = resolve(root, '..', 'iflowone', 'packages')
 
-const IFLOW_CORE = {
-  'iflow-adapter-sdk': join(corePackagesRoot, 'iflow-adapter-sdk', 'src', 'index.ts'),
-  'iflow-domain': join(corePackagesRoot, 'iflow-domain', 'src', 'index.ts'),
-  'iflow-protocol': join(corePackagesRoot, 'iflow-protocol', 'src', 'index.ts'),
-}
+const IFLOW_CORE = ['iflow-adapter-sdk', 'iflow-domain', 'iflow-protocol']
 
-const missing = Object.entries(IFLOW_CORE).filter(([, entry]) => !existsSync(entry))
+// Presence check rather than `require.resolve`: these packages are ESM-only,
+// with no `require` condition in their exports map, so resolving them from CJS
+// throws even when they are installed correctly.
+const missing = IFLOW_CORE.filter((name) => !existsSync(join(root, 'node_modules', name, 'package.json')))
 if (missing.length > 0) {
   console.error(
-    'Cannot build: the iFlow core packages were not found.\n' +
-      missing.map(([name, entry]) => `  ${name} -> ${entry}`).join('\n') +
-      '\n\nThe plugin bundles them from the sibling iflowone repository.\n' +
-      'Clone it next to this one so that ../iflowone/packages/* exists.',
+    `Cannot build: ${missing.join(', ')} not installed.\n\n` +
+      'Run `npm install` first. These are devDependencies bundled into\n' +
+      'lib/index.js at build time; they are published on npm.',
   )
   process.exit(1)
-}
-
-/** Map the bare iFlow package names to their TypeScript sources. */
-const iflowCorePlugin = {
-  name: 'iflow-core-alias',
-  setup(pluginBuild) {
-    const pattern = new RegExp(`^(${Object.keys(IFLOW_CORE).join('|')})$`)
-    pluginBuild.onResolve({ filter: pattern }, (args) => ({ path: IFLOW_CORE[args.path] }))
-  },
 }
 
 await build({
@@ -63,6 +54,5 @@ await build({
     '@deepseek-ai/dsh-session',
     '@deepseek-ai/cordis',
   ],
-  plugins: [iflowCorePlugin],
   logLevel: 'info',
 })

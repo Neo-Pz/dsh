@@ -8,8 +8,10 @@ delegate work under scoped grants (L0–L3), and meters the tokens it sends and 
 
 It is also the first **iFlowOne edge adapter**: it journals what this runtime actually did as signed,
 replayable domain events, and serves the projections the iFlowOne Hub reads. The domain, protocol and
-edge logic live in [`iflowone`](../iflowone) and know nothing about DSH — this repository is the
-runtime binding.
+edge logic are open source at [`Neo-Pz/iFlowOne`](https://github.com/Neo-Pz/iFlowOne) under
+Apache-2.0 and published on npm; they know nothing about DSH. This repository is the runtime
+binding — one reference implementation of an adapter, and the thing to read if you are writing
+another.
 
 [![npm](https://img.shields.io/badge/dsh-plugin-github%3ANeo--Pz%2Fdsh-blue)](https://github.com/Neo-Pz/dsh)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
@@ -120,7 +122,8 @@ suite — nothing else in the core knows this runtime exists.
 Developing does:
 
 ```sh
-node scripts/build.mjs   # bundles ../iflowone/packages/* into lib/index.js
+npm install
+node scripts/build.mjs   # bundles the iFlow core packages into lib/index.js
 npm test                 # 41 tests, run against that bundle and the real iflow-id
 ```
 
@@ -128,8 +131,10 @@ The suite covers the architecture's five failure tests against a real on-disk jo
 signing end to end through the Rust binary, the command path's at-most-once guarantee across a
 restart, and the pure helpers (including the hand-rolled SHA-256, pinned against `node:crypto`).
 
-The iFlow core packages are intentionally **not** dependencies in `package.json`: they are bundled at
-build time from the sibling `iflowone` checkout, which keeps the one-click install path working.
+[`iflow-adapter-sdk`](https://www.npmjs.com/package/iflow-adapter-sdk) and its two dependencies are
+`devDependencies`: the build inlines them into `lib/index.js`, so an install from git resolves
+nothing at runtime and the one-click path keeps working. To develop against unreleased changes in
+them, `npm link`.
 
 ## License
 
