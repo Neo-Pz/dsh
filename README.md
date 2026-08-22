@@ -6,6 +6,11 @@ iFlow is both a **DSH plugin** and a small **protocol**. It gives agents on diff
 signed, task-oriented A2A channel: each side identifies itself with a `did:key` trust root, can
 delegate work under scoped grants (L0–L3), and meters the tokens it sends and receives.
 
+It is also the first **iFlowOne edge adapter**: it journals what this runtime actually did as signed,
+replayable domain events, and serves the projections the iFlowOne Hub reads. The domain, protocol and
+edge logic live in [`iflowone`](../iflowone) and know nothing about DSH — this repository is the
+runtime binding.
+
 [![npm](https://img.shields.io/badge/dsh-plugin-github%3ANeo--Pz%2Fdsh-blue)](https://github.com/Neo-Pz/dsh)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
@@ -29,6 +34,17 @@ delegate work under scoped grants (L0–L3), and meters the tokens it sends and 
   messages to a peer that is offline are queued and redelivered when it returns.
 - **Runtime health** — peer reachability is probed on read; registrations are persisted so they
   survive restarts.
+- **Origin Journal + projections** — DSH session, turn, tool and approval lifecycles are journaled
+  as append-only `IFlowEvent`s under `<workspace>/.iflow/edge/origin.ndjson`, folded into local
+  projections, and served read-only at `/iflow/projection/*`, `/iflow/journal` and `/iflow/stream`.
+  Deleting the projections and replaying the journal reproduces the same state.
+- **Signed facts** — every journaled event carries a detached Ed25519 signature over its canonical
+  bytes, made by the same `iflow-id` key that signs the AgentCard. A verifier can therefore check any
+  fact off-node. An edge with no key material still journals; those events are counted as unsigned
+  rather than silently dropped.
+- **Command path (opt-in)** — `POST /iflow/command` lets a Hub request an action. It is refused
+  outright unless `config.acceptCommands` is set, a repeated delivery never executes twice, and
+  nothing on it can grant a permission DSH would deny.
 
 ## Install
 
@@ -59,6 +75,11 @@ dsh plugin --profile web add dsh-plugin-terminal
 3. Use the `iflow_send` tool (host-side) to delegate a task to the peer; the peer runs it as a local
    agent and returns the final answer.
 
+> **Inbound tasks are confined, and fail closed.** A remote peer's task runs under the restricted
+> `remote-a2a` agent preset. If that preset is not installed, the task is **rejected** rather than
+> silently downgraded to the full local toolset. Set `config.inboundPreset` to name a different
+> restricted preset, or `config.allowUnrestrictedInbound: true` to accept the risk deliberately.
+
 ## The protocol
 
 - **Transport**: JSON-RPC 2.0 over HTTP (`/a2a`), AgentCard at `/.well-known/agent-card.json`.
@@ -74,9 +95,41 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
 ## Architecture
 
 - `src/index.ts` — the DSH Host plugin (`iflow_send`, peers, mirror, mailbox, metering, A2A dispatch).
+- `src/runtime/dsh-ports.ts` — DSH implementations of the iFlow `RuntimePorts` (storage, subprocess,
+  HTTP, clock, logger, ids).
+- `src/runtime/dsh-instrumentation.ts` — the only place that maps DSH lifecycle events to iFlow
+  domain facts. Observe-only: it can never deny a tool call or delay a turn.
+- `src/runtime/dsh-command-executor.ts` — the inbound command path, fail-closed by default.
+- `src/edge/install.ts` — brings the edge up and mounts the read API.
+- `src/identity/iflow-id.ts` — the `Signer`/`Verifier` ports, backed by the Rust binary. Key
+  material never enters the Node process.
+- `src/a2a/`, `src/util/` — the pure A2A and hashing helpers (wire shapes, capability-id rules, the
+  sandbox's hand-rolled SHA-256), extracted so they can be unit tested.
 - `rust/` — the `iflow-id` reference implementation (identity/store, signing, AgentCard, grants,
   pricing, usage), invoked via `ctx.subprocess`.
-- Runtime state lives under `<workspace>/.iflow/` (identity, nonces, peers, mailbox, usage, pricing).
+- Runtime state lives under `<workspace>/.iflow/` (identity, nonces, peers, mailbox, usage, pricing)
+  and `<workspace>/.iflow/edge/` (origin journal, outbox, command ledger, checkpoint).
+
+Those two `runtime/` files are the **entire** DSH coupling. Porting iFlow to another application
+means writing their equivalents against `iflow-adapter-sdk`'s ports and passing its conformance
+suite — nothing else in the core knows this runtime exists.
+
+### Building
+
+`lib/index.js` is the file DSH loads, and it is committed, so installing from GitHub needs no build.
+Developing does:
+
+```sh
+node scripts/build.mjs   # bundles ../iflowone/packages/* into lib/index.js
+npm test                 # 41 tests, run against that bundle and the real iflow-id
+```
+
+The suite covers the architecture's five failure tests against a real on-disk journal, origin
+signing end to end through the Rust binary, the command path's at-most-once guarantee across a
+restart, and the pure helpers (including the hand-rolled SHA-256, pinned against `node:crypto`).
+
+The iFlow core packages are intentionally **not** dependencies in `package.json`: they are bundled at
+build time from the sibling `iflowone` checkout, which keeps the one-click install path working.
 
 ## License
 
