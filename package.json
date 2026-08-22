@@ -1,9 +1,17 @@
 {
   "name": "iflow-dsh-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "iFlow A2A bridge for DeepSeek Harness (v20: P1 trust root + P2 delegation + P4 token metering).",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node22 --external:@deepseek-ai/dsh-tools --external:@deepseek-ai/dsh-llm --external:@deepseek-ai/dsh-session --external:@deepseek-ai/cordis --outfile=lib/index.js"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -14,5 +22,8 @@
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/cordis": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.6"
   }
 }
