@@ -39,6 +39,9 @@ export default {
     const agents = ctx.agents
     const workspace = ctx.sandboxPolicy.workspaceRoot
     const allowPeerUpdate = config.allowPeerUpdate === true
+    // Writing into DSH's own session store is opt-in and, today, broken — see
+    // `recordExchange`. The exchange is journaled either way.
+    const mirrorEnabled = config.mirror === true
 
     function makeAbortController() {
       const listeners = new Set()
@@ -291,6 +294,63 @@ export default {
     //                  assistant/message left (MessageItem.cs style), so swapping
     //                  the roles relative to the A2A direction yields the WeChat
     //                  bubble layout: remote on the left, self on the right.
+    /**
+     * Record one side of an agent-to-agent exchange.
+     *
+     * Two destinations, and only one of them is ours:
+     *
+     * The JOURNAL is where this belongs. An A2A exchange is a fact about this
+     * node — who spoke, when, on which task — and the journal already carries
+     * the rest of that story under the same `taskId`: the grant it arrived
+     * with, the task it started, the tools it called, the approvals it waited
+     * on. Recorded here it is signed, replayable, and ours.
+     *
+     * The MIRROR is a DSH chat session the plugin writes into so the exchange
+     * shows up in the host's UI. It is off by default now, because it does not
+     * work and cannot be made to: the plugin passes `surfaceOp` on every
+     * append, DSH's persistence does not store it, and DSH's loader then
+     * rejects the file it wrote itself —
+     *
+     *   invalid seed event at index 3: session event "assistant/message"
+     *   is surface-eligible and requires a surfaceOp marker
+     *
+     * That is a round trip through someone else's private format, and keeping
+     * up with it means reverse-engineering it again on every DSH release. Set
+     * `config.mirror: true` to turn it back on and accept that.
+     */
+    async function recordExchange(side, text, label, peer) {
+      // The fact, first and unconditionally: it must not depend on a UI
+      // integration being healthy.
+      //
+      // Written straight to the journal rather than through an observer method,
+      // because the SDK has none for this — `a2a.message` is a type this
+      // adapter defines. The domain's reducers ignore what they do not know, so
+      // it lands in the journal and in Replay without disturbing any
+      // projection, which is the right shape for a log of exchanges.
+      if (edgeHandle) {
+        try {
+          await edgeHandle.edge.journal.record({
+            type: 'a2a.message',
+            subject: { kind: 'agent', id: peer || label },
+            payload: {
+              direction: side === 'self' ? 'outbound' : 'inbound',
+              peer: peer || null,
+              label,
+              // Free text, and the most revealing this node holds. It stays
+              // here: `text` is redacted before anything is published.
+              text,
+            },
+            evidence: { source: 'a2a' },
+          })
+        } catch (err) {
+          console.error('iFlow: could not journal an A2A message', err && err.message ? err.message : err)
+        }
+      }
+
+      if (!mirrorEnabled) return
+      await mirrorAppend(side, text, label)
+    }
+
     async function mirrorAppend(side, text, label) {
       try {
         const mirror = await ensureMirror()
@@ -876,7 +936,7 @@ export default {
         }
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
-      await mirrorAppend('remote', text, `[agent:${from || 'remote'}]`)
+      await recordExchange('remote', text, `[agent:${from || 'remote'}]`, from)
       const childId = `iflow-${uid('agent')}`
       let handle
       try {
@@ -949,7 +1009,7 @@ export default {
           }]
         }
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
-        await mirrorAppend('self', textOut, `[agent:${state.alias}]`)
+        await recordExchange('self', textOut, `[agent:${state.alias}]`, state.alias)
       } else {
         setStatus(taskId, 'TASK_STATE_FAILED', 'The local agent produced no output.')
       }
@@ -1716,10 +1776,10 @@ export default {
           const result = response.result || {}
           const task = result.task
           // Mirror the outbound prompt (self → right, WeChat "me") once accepted.
-          try { await mirrorAppend('self', args.prompt, `[agent:${state.alias}]`) } catch (e) { /* mirror is best-effort */ }
+          try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer) } catch (e) { /* best-effort */ }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
-            if (text.length > 0) try { await mirrorAppend('remote', text, `[agent:${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
             return {
               ok: text.length > 0, peer: args.peer, taskId: '', state: 'MESSAGE', text,
               ...(text.length === 0 ? { error: 'remote returned an empty message' } : {}),
@@ -1728,7 +1788,7 @@ export default {
           if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
           if (TERMINAL_TASK_STATES.has(task.status.state)) {
             const text = taskText(task)
-            if (text.length > 0) try { await mirrorAppend('remote', text, `[agent:${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
@@ -1757,7 +1817,7 @@ export default {
           }
           if (!TERMINAL_TASK_STATES.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
           const text = taskText(finalTask)
-          if (text.length > 0) try { await mirrorAppend('remote', text, `[${args.peer}]`) } catch (e) { /* mirror is best-effort */ }
+          if (text.length > 0) try { await recordExchange('remote', text, `[${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,

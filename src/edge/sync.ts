@@ -21,11 +21,12 @@
  * Payload keys that carry human-written text rather than structure.
  *
  * Everything else an event holds is an id, a name, a state or a timestamp, and
- * those are what the projections are built from. Redacting these two therefore
+ * those are what the projections are built from. Redacting these therefore
  * costs the network nothing it uses, while a task title is exactly the field
- * that leaks what someone is working on.
+ * that leaks what someone is working on — and `text`, the body of an
+ * agent-to-agent message, is the most revealing field this node ever holds.
  */
-const FREE_TEXT_KEYS = ['title', 'reason']
+const FREE_TEXT_KEYS = ['title', 'reason', 'text']
 
 const REDACTED = '[redacted at origin]'
 

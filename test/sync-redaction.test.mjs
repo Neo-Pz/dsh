@@ -75,6 +75,23 @@ describe('redaction before upload', () => {
     assert.deepEqual(out.redaction.fields, ['payload.reason'])
   })
 
+  it('redacts the body of an agent-to-agent message', () => {
+    // The most revealing field this node ever holds. Agent names, direction and
+    // timing are structure and stay; what was actually said does not leave.
+    const out = redactEvent(
+      event({
+        type: 'a2a.message',
+        payload: { direction: 'inbound', peer: 'if-dsk', label: '[agent:if-dsk]', text: 'deploy the billing exporter to prod' },
+      }),
+      'structural',
+    )
+
+    assert.match(out.payload.text, /redacted/)
+    assert.equal(out.payload.peer, 'if-dsk', 'who spoke is structure')
+    assert.equal(out.payload.direction, 'inbound')
+    assert.deepEqual(out.redaction.fields, ['payload.text'])
+  })
+
   it('drops the signature rather than shipping one that cannot verify', () => {
     const out = redactEvent(signedEvent(), 'structural')
 
