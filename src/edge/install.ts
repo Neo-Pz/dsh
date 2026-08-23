@@ -19,6 +19,7 @@ import {
 } from '../runtime/dsh-command-executor.js'
 import { installDshInstrumentation } from '../runtime/dsh-instrumentation.js'
 import { createDshPorts } from '../runtime/dsh-ports.js'
+import { startCommunitySync } from './sync.js'
 
 /**
  * A stable id for this machine+workspace pair.
@@ -53,6 +54,9 @@ function deriveNodeId(workspace) {
  *                           edge in step with the plugin instead of freezing
  *                           whatever the token was at install time.
  * @param options.capabilities capability ids this node advertises
+ * @param options.community    { url, token, visibility, intervalMs } — when set,
+ *                           the outbox is flushed to that Community. Absent by
+ *                           default: installing this plugin publishes nothing.
  * @param options.runIflowId   invoke the identity binary (args -> stdout)
  * @param options.writeScratch persist bytes for the binary to read, return path
  */
@@ -182,6 +186,16 @@ export async function installIFlowEdge(ctx, options) {
     )
   }
 
+  // Outbound sync, off unless an operator configured a Community. Started
+  // after the edge is live so the first flush has a journal to read.
+  let stopSync = () => {}
+  if (options.community && options.community.url && options.community.token) {
+    stopSync = startCommunitySync(ctx, edge, options.community)
+    ctx.logger?.info?.(
+      `iFlow: publishing facts to ${options.community.url} (${options.community.visibility === 'full' ? 'FULL text' : 'free text redacted'})`,
+    )
+  }
+
   return {
     edge,
     nodeId,
@@ -194,6 +208,7 @@ export async function installIFlowEdge(ctx, options) {
       // Stop accepting work first, then stop listening, then let the
       // already-queued facts finish landing so a shutdown does not lose the
       // last few observations.
+      stopSync()
       commandRoute.dispose()
       approvals.dispose()
       registry.dispose()

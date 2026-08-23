@@ -1944,6 +1944,21 @@ export default {
           // the box, but it cannot cause work here until an operator says so.
           acceptCommands: config.acceptCommands === true,
           routeApprovals: config.routeApprovals === true,
+          // Publishing is off until an operator names a Community AND gives it
+          // a token. Installing this plugin sends nothing anywhere; this is the
+          // line between `Local Discover` and going public, and it is crossed
+          // by editing config, never by default.
+          community:
+            config.community && config.community.url && config.community.token
+              ? {
+                  url: String(config.community.url),
+                  token: String(config.community.token),
+                  // Free text ('title', 'reason') is redacted before upload
+                  // unless the operator explicitly asks for 'full'.
+                  visibility: config.community.visibility === 'full' ? 'full' : 'structural',
+                  intervalMs: Number(config.community.intervalMs) || 60000,
+                }
+              : undefined,
         })
         console.log(`iFlow edge ready: node ${edgeHandle.nodeId}, journal .iflow/edge/origin.ndjson, projections on /iflow/projection/*`)
       } catch (err) {
