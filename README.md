@@ -44,9 +44,11 @@ another.
   bytes, made by the same `iflow-id` key that signs the AgentCard. A verifier can therefore check any
   fact off-node. An edge with no key material still journals; those events are counted as unsigned
   rather than silently dropped.
-- **Command path (opt-in)** — `POST /iflow/command` lets a Hub request an action. It is refused
-  outright unless `config.acceptCommands` is set, a repeated delivery never executes twice, and
-  nothing on it can grant a permission DSH would deny.
+- **Command path (opt-in, authenticated)** — `POST /iflow/command` lets a Hub request an action. It
+  is refused outright unless `config.acceptCommands` is set, and it answers `503` until a shared
+  token exists (`config.token`, or `iflow_set_token` at runtime): the one write route never serves
+  unauthenticated, however the port is bound. A repeated delivery never executes twice, and nothing
+  on it can grant a permission DSH would deny.
 
 ## Install
 

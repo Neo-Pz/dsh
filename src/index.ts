@@ -68,7 +68,9 @@ export default {
       syncVersion: '20',
       updatedAt: new Date().toISOString(),
       alias: 'if-lt',
-      token: null,
+      // Seeded from plugin config so a node can come up with auth already on;
+      // `iflow_set_token` still changes it at runtime.
+      token: typeof config.token === 'string' && config.token.length > 0 ? config.token : null,
       publicUrl: null,
       peers: new Map(),
       tasks: new Map(),
@@ -1926,7 +1928,8 @@ export default {
           alias: state.alias,
           version: state.syncVersion,
           did: identity.did,
-          token: state.token,
+          // A getter, not the value: the token can change after this call.
+          token: () => state.token,
           capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
           // The edge signs through the same binary the rest of the plugin uses,
           // so there is exactly one place that holds key material.

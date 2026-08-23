@@ -2,6 +2,7 @@
  * The command path, exercised against the real built bundle.
  *
  * What these assertions protect:
+ *   - the one write route refuses to serve at all without a token
  *   - a Hub cannot cause work on an edge that did not opt in
  *   - a repeated delivery never produces a second side effect
  *   - answering an approval from a Task Room does not remove DSH's own answer
@@ -26,10 +27,16 @@ async function waitFor(predicate, what, timeoutMs = 3000) {
 function createStubContext(workspace) {
   const listeners = new Map()
   const routes = new Map()
+  const tools = new Map()
   const disposers = []
 
   const ctx = {
-    tools: { register: () => () => {} },
+    tools: {
+      register(tool) {
+        tools.set(tool.name, tool)
+        return () => tools.delete(tool.name)
+      },
+    },
     webServer: {
       host: '127.0.0.1',
       port: 3080,
@@ -129,11 +136,11 @@ function createStubContext(workspace) {
       handler(req, res).catch(reject)
     })
 
-  const get = (path) =>
+  const get = (path, headers = {}) =>
     new Promise((resolve, reject) => {
       const handler = routes.get(path)
       if (!handler) return reject(new Error(`no route mounted at ${path}`))
-      const req = { method: 'GET', url: path, headers: {}, on() {} }
+      const req = { method: 'GET', url: path, headers, on() {} }
       let status = 0
       const res = {
         writeHead(code) {
@@ -149,8 +156,11 @@ function createStubContext(workspace) {
       handler(req, res).catch(reject)
     })
 
-  return { ctx, emit, startWaterfall, post, get, routes, disposers }
+  return { ctx, emit, startWaterfall, post, get, routes, tools, disposers }
 }
+
+const TOKEN = 'test-token'
+const AUTH = { authorization: `Bearer ${TOKEN}` }
 
 async function bootPlugin(config) {
   const workspace = mkdtempSync(join(tmpdir(), 'iflow-cmd-'))
@@ -161,8 +171,10 @@ async function bootPlugin(config) {
   await waitFor(() => host.routes.has('/iflow/command'), 'the command route to mount')
 
   // A command names the node it is for, so a misrouted one can be refused
-  // rather than executed. The Hub learns the id the same way: by reading it.
-  const status = await host.get('/iflow/edge/status')
+  // rather than executed. The Hub learns the id the same way: by reading it —
+  // through the same bearer check, because a token closes the read API too.
+  const status = await host.get('/iflow/edge/status', config.token ? AUTH : {})
+  assert.equal(status.status, 200, 'the edge status route should answer')
   return { workspace, host, nodeId: status.json.nodeId }
 }
 
@@ -185,7 +197,7 @@ describe('command path — closed by default', () => {
   let nodeId
 
   before(async () => {
-    ;({ workspace, host, nodeId } = await bootPlugin({}))
+    ;({ workspace, host, nodeId } = await bootPlugin({ token: TOKEN }))
   })
 
   after(() => {
@@ -198,14 +210,14 @@ describe('command path — closed by default', () => {
     } }
     await host.emit('agent/created', { agent })
 
-    const response = await host.post('/iflow/command', command(nodeId))
+    const response = await host.post('/iflow/command', command(nodeId), AUTH)
     assert.equal(response.status, 200)
     assert.equal(response.json.accepted, false)
     assert.match(response.json.reason, /does not accept commands/)
   })
 
   it('rejects a malformed body without reaching the ledger', async () => {
-    const response = await host.post('/iflow/command', { nonsense: true })
+    const response = await host.post('/iflow/command', { nonsense: true }, AUTH)
     assert.equal(response.json.accepted, false)
     assert.match(response.json.reason, /malformed/)
   })
@@ -217,7 +229,7 @@ describe('command path — opted in', () => {
   let nodeId
 
   before(async () => {
-    ;({ workspace, host, nodeId } = await bootPlugin({ acceptCommands: true, routeApprovals: true }))
+    ;({ workspace, host, nodeId } = await bootPlugin({ token: TOKEN, acceptCommands: true, routeApprovals: true }))
   })
 
   after(() => {
@@ -236,13 +248,13 @@ describe('command path — opted in', () => {
     }
     await host.emit('agent/created', { agent })
 
-    const first = await host.post('/iflow/command', command(nodeId))
+    const first = await host.post('/iflow/command', command(nodeId), AUTH)
     assert.equal(first.json.accepted, true)
     assert.equal(cancels, 1)
 
     // Same command id, and then the same idempotency key under a new id.
-    const second = await host.post('/iflow/command', command(nodeId))
-    const third = await host.post('/iflow/command', command(nodeId, { commandId: 'cmd-1-resent' }))
+    const second = await host.post('/iflow/command', command(nodeId), AUTH)
+    const third = await host.post('/iflow/command', command(nodeId, { commandId: 'cmd-1-resent' }), AUTH)
 
     assert.equal(cancels, 1)
     assert.equal(second.json.accepted, true)
@@ -253,6 +265,7 @@ describe('command path — opted in', () => {
     const response = await host.post(
       '/iflow/command',
       command(nodeId, { commandId: 'cmd-2', idempotencyKey: 'idem-2', requestedAction: 'shell.run' }),
+      AUTH,
     )
     assert.equal(response.json.accepted, false)
     assert.match(response.json.reason, /unsupported action shell\.run/)
@@ -262,6 +275,7 @@ describe('command path — opted in', () => {
     const response = await host.post(
       '/iflow/command',
       command(nodeId, { commandId: 'cmd-3', idempotencyKey: 'idem-3', target: { nodeId: 'someone-else', taskId: 'task-sess-1' } }),
+      AUTH,
     )
     assert.equal(response.json.accepted, false)
     assert.match(response.json.reason, /targets node someone-else/)
@@ -293,6 +307,7 @@ describe('command path — opted in', () => {
         target: { nodeId, taskId: 'task-sess-9' },
         requestedAction: 'approval.resolve:allow',
       }),
+      AUTH,
     )
 
     assert.equal(response.json.accepted, true, `command was refused: ${response.json.reason}`)
@@ -308,6 +323,7 @@ describe('command path — opted in', () => {
         target: { nodeId, taskId: 'task-sess-nobody' },
         requestedAction: 'approval.resolve:allow',
       }),
+      AUTH,
     )
     assert.equal(response.json.accepted, false)
     assert.match(response.json.reason, /no approval is waiting/)
@@ -323,5 +339,116 @@ describe('command path — opted in', () => {
 
     assert.ok(ledger.some((record) => record.commandId === 'cmd-1' && record.status === 'accepted'))
     assert.ok(ledger.some((record) => record.commandId === 'cmd-2' && record.status === 'rejected'))
+  })
+})
+
+describe('command path — no token configured', () => {
+  let workspace
+  let host
+  let nodeId
+
+  before(async () => {
+    // `acceptCommands` is on and auth is off: the combination that used to
+    // execute task.cancel for anyone who could reach the port.
+    ;({ workspace, host, nodeId } = await bootPlugin({ acceptCommands: true }))
+  })
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('refuses to serve the write route at all, rather than serving it open', async () => {
+    const agent = { id: 'sess-1', session: { id: 'sess-1', header: { meta: {} } }, options: {}, cancel() {
+      throw new Error('an unauthenticated command must never reach the runtime')
+    } }
+    await host.emit('agent/created', { agent })
+
+    const response = await host.post('/iflow/command', command(nodeId))
+    assert.equal(response.status, 503)
+    assert.match(response.json.error, /requires a configured token/)
+  })
+
+  it('refuses a caller who brings a token of their own', async () => {
+    const response = await host.post('/iflow/command', command(nodeId), { authorization: 'Bearer guessed' })
+    assert.equal(response.status, 503)
+  })
+})
+
+describe('command path — wrong token', () => {
+  let workspace
+  let host
+  let nodeId
+
+  before(async () => {
+    ;({ workspace, host, nodeId } = await bootPlugin({ token: TOKEN, acceptCommands: true }))
+  })
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('answers 401 without dispatching', async () => {
+    const agent = { id: 'sess-1', session: { id: 'sess-1', header: { meta: {} } }, options: {}, cancel() {
+      throw new Error('a command with the wrong token must never reach the runtime')
+    } }
+    await host.emit('agent/created', { agent })
+
+    const wrong = await host.post('/iflow/command', command(nodeId), { authorization: 'Bearer not-the-token' })
+    assert.equal(wrong.status, 401)
+
+    const missing = await host.post('/iflow/command', command(nodeId))
+    assert.equal(missing.status, 401)
+  })
+})
+
+describe('command path — a token set after the edge is up', () => {
+  let workspace
+  let host
+  let nodeId
+
+  before(async () => {
+    ;({ workspace, host, nodeId } = await bootPlugin({ acceptCommands: true }))
+  })
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('opens once the operator sets one, without a restart', async () => {
+    let cancels = 0
+    const agent = {
+      id: 'sess-1',
+      session: { id: 'sess-1', header: { meta: {} } },
+      options: {},
+      cancel() {
+        cancels += 1
+      },
+    }
+    await host.emit('agent/created', { agent })
+
+    const closed = await host.post('/iflow/command', command(nodeId), AUTH)
+    assert.equal(closed.status, 503)
+    assert.equal(cancels, 0)
+
+    // The edge was installed while the token was null. It has to read the
+    // plugin's live token, not the one it was handed at install time.
+    const setToken = host.tools.get('iflow_set_token')
+    assert.ok(setToken, 'iflow_set_token should be registered')
+    assert.deepEqual(await setToken.execute({ token: TOKEN }), { ok: true, authEnabled: true })
+
+    const opened = await host.post('/iflow/command', command(nodeId), AUTH)
+    assert.equal(opened.status, 200)
+    assert.equal(opened.json.accepted, true, `command was refused: ${opened.json.reason}`)
+    assert.equal(cancels, 1)
+
+    // And it closes again the same way.
+    await setToken.execute({ token: '' })
+    const reclosed = await host.post(
+      '/iflow/command',
+      command(nodeId, { commandId: 'cmd-after-clear', idempotencyKey: 'idem-after-clear' }),
+      AUTH,
+    )
+    assert.equal(reclosed.status, 503)
+    assert.equal(cancels, 1)
   })
 })

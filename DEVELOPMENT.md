@@ -138,4 +138,5 @@ cargo build --release --manifest-path F:\i_Flow_One\deepseek-harness\.local\plug
   再去掉签名本身。密钥不进 Node 进程，由 `iflow-id sign-blob` 处理。没有身份时
   仍然记账，但计入 `journal.unsignedWriteCount` 并在启动时告警，不静默降级。
 - 命令通道同样默认关闭。`config.acceptCommands: true` 才会让 `POST /iflow/command` 真正执行任何动作；`config.routeApprovals: true` 才会让 Task Room 参与审批（它与 DSH 本地审批**并行竞速**，先答者胜，不会绕过本地授权点）。
+- **命令通道无 token 不开门。** 这条唯一的写路由在没有共享 token 时返回 `503`，而不是像读 API 那样"没配 token 就放行"——否则 `acceptCommands: true` 且未设 token 的节点，任何能连到该端口的人都能取消任务（默认只有 loopback，但离 `--host 0.0.0.0` 只差一步）。token 可以用 `config.token` 在启动时给，也可以随时用 `iflow_set_token` 设置/清除：edge 每次请求都读插件的当前值，不是安装那一刻的快照。
 - 若浏览器显示拒绝连接，先确认启动终端仍在运行，再访问该次日志打印的新端口；不要复用旧实例的端口。

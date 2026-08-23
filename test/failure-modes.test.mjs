@@ -106,7 +106,9 @@ function createHost(workspace) {
     for (const listener of listeners.get(name) ?? []) await listener(...args)
   }
 
-  const request = (method, path, { query = {}, body, headers = {} } = {}) =>
+  // Reads are bearer-checked whenever the node has a token, so the default
+  // carries one; a node booted without a token ignores the header.
+  const request = (method, path, { query = {}, body, headers = AUTH } = {}) =>
     new Promise((resolve, reject) => {
       const handler = routes.get(path)
       if (!handler) return reject(new Error(`no route mounted at ${path}`))
@@ -138,6 +140,9 @@ function createHost(workspace) {
 
   return { ctx, emit, routes, request }
 }
+
+const TOKEN = 'test-token'
+const AUTH = { authorization: `Bearer ${TOKEN}` }
 
 /** Boot the built plugin over `workspace`, waiting for the edge to be live. */
 async function boot(workspace, config = {}) {
@@ -190,7 +195,7 @@ describe('the five failure tests, against a real on-disk journal', () => {
     if (existsSync(IFLOW_ID)) {
       spawnSync(IFLOW_ID, ['--home', workspace, 'create', 'failure-tests'], { encoding: 'utf8' })
     }
-    host = await boot(workspace, { acceptCommands: true })
+    host = await boot(workspace, { token: TOKEN, acceptCommands: true })
     await runTurn(host, 'sess-a', 1, 'first real turn')
     await waitFor(() => readJournal(workspace).some((e) => e.type === 'task.completed'), 'the turn to settle')
   })
@@ -267,15 +272,15 @@ describe('the five failure tests, against a real on-disk journal', () => {
       correlationId: 'corr-failure-3',
     }
 
-    const first = await host.request('POST', '/iflow/command', { body: command })
+    const first = await host.request('POST', '/iflow/command', { headers: AUTH, body: command })
     assert.equal(first.json.accepted, true, first.json.reason)
-    await host.request('POST', '/iflow/command', { body: command })
+    await host.request('POST', '/iflow/command', { headers: AUTH, body: command })
     assert.equal(cancels, 1)
 
     // Restart: the ledger on disk must still remember this command.
-    const restarted = await boot(workspace, { acceptCommands: true })
+    const restarted = await boot(workspace, { token: TOKEN, acceptCommands: true })
     await restarted.emit('agent/created', { agent })
-    const afterRestart = await restarted.request('POST', '/iflow/command', { body: command })
+    const afterRestart = await restarted.request('POST', '/iflow/command', { headers: AUTH, body: command })
 
     assert.equal(cancels, 1, 'a restart must not make a delivered command executable again')
     assert.equal(afterRestart.json.accepted, true)
@@ -313,6 +318,7 @@ describe('the five failure tests, against a real on-disk journal', () => {
 
     // Out-of-scope: an action this edge does not implement.
     const unsupported = await host.request('POST', '/iflow/command', {
+      headers: AUTH,
       body: {
         commandId: 'cmd-failure-5a',
         idempotencyKey: 'idem-failure-5a',
@@ -328,6 +334,7 @@ describe('the five failure tests, against a real on-disk journal', () => {
 
     // Misrouted: addressed to a different node.
     const misrouted = await host.request('POST', '/iflow/command', {
+      headers: AUTH,
       body: {
         commandId: 'cmd-failure-5b',
         idempotencyKey: 'idem-failure-5b',
@@ -343,6 +350,7 @@ describe('the five failure tests, against a real on-disk journal', () => {
 
     // Expired: past its own deadline.
     const expired = await host.request('POST', '/iflow/command', {
+      headers: AUTH,
       body: {
         commandId: 'cmd-failure-5c',
         idempotencyKey: 'idem-failure-5c',

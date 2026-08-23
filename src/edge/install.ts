@@ -47,7 +47,11 @@ function deriveNodeId(workspace) {
  * @param options.alias      this node's display name (the plugin's `state.alias`)
  * @param options.version    plugin sync version, recorded on the edge's agent
  * @param options.did        this node's did:key, when the identity exists
- * @param options.token      shared bearer token, when the plugin has one
+ * @param options.token      shared bearer token, or a getter for it. The
+ *                           operator can set the token at runtime with
+ *                           `iflow_set_token`, so pass a getter to keep the
+ *                           edge in step with the plugin instead of freezing
+ *                           whatever the token was at install time.
  * @param options.capabilities capability ids this node advertises
  * @param options.runIflowId   invoke the identity binary (args -> stdout)
  * @param options.writeScratch persist bytes for the binary to read, return path
@@ -91,6 +95,10 @@ export async function installIFlowEdge(ctx, options) {
     }
   }
 
+  // Read the token per request: `iflow_set_token` can change it long after the
+  // edge is installed, and a snapshot taken here would ignore that.
+  const currentToken = () => (typeof options.token === 'function' ? options.token() : options.token)
+
   const edge = await createEdge({
     ports,
     descriptor,
@@ -101,8 +109,9 @@ export async function installIFlowEdge(ctx, options) {
       // been configured to bind a LAN address, so it reuses the plugin's own
       // bearer check rather than assuming the port is private.
       authorize: (request) => {
-        if (!options.token) return true
-        return request.headers['authorization'] === `Bearer ${options.token}`
+        const token = currentToken()
+        if (!token) return true
+        return request.headers['authorization'] === `Bearer ${token}`
       },
       // The standalone Web app is served from its own dev origin.
       allowedOrigins: options.allowedOrigins,
@@ -138,7 +147,16 @@ export async function installIFlowEdge(ctx, options) {
         body: JSON.stringify(body),
       })
 
-      if (options.token && request.headers['authorization'] !== `Bearer ${options.token}`) {
+      // Fail closed when no token is configured. The old check was
+      // `if (options.token && ...)`, so a node with `acceptCommands: true` and
+      // auth off executed task.cancel for anyone who could reach the port —
+      // loopback by default, but one `--host 0.0.0.0` away from remote
+      // cancellation. An unauthenticated write path is refused, not opened.
+      const token = currentToken()
+      if (!token) {
+        return json(503, { error: 'the command channel requires a configured token; set one with iflow_set_token' })
+      }
+      if (request.headers['authorization'] !== `Bearer ${token}`) {
         return json(401, { error: 'unauthorized' })
       }
 
