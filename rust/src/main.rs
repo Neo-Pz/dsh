@@ -37,24 +37,53 @@ use grant::{Capability, GrantSpec, Level, RevokeVerdict, RootAck, RootStrength};
 use identity::did_key::DidKey;
 use identity::store::{self, STORAGE_PLAINTEXT_DEV, StoredIdentity};
 
+/// Where node-wide state lives: `IFLOW_NODE_HOME`, falling back to the identity
+/// home so a single-identity install is unaffected.
+pub fn node_home() -> String {
+    std::env::var("IFLOW_NODE_HOME")
+        .or_else(|_| std::env::var("IFLOW_HOME"))
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
-    // --home <dir> overrides the identity-store location (IFLOW_HOME) so a
-    // sandboxed runtime (e.g. the DSH plugin) can keep ~/.iflow inside its
-    // own workspace root. Set as an env var so every module picks it up.
+    // --home <dir> overrides the IDENTITY-store location (IFLOW_HOME) so a
+    // sandboxed runtime (e.g. the DSH plugin) can keep ~/.iflow inside its own
+    // workspace root. Set as an env var so every module picks it up.
+    //
+    // --node-home <dir> overrides where NODE-WIDE state lives (IFLOW_NODE_HOME):
+    // the revocation registry and the pricing table. These two are not
+    // properties of a key.
+    //
+    // The distinction exists because one machine now holds several identities —
+    // a principal plus one key per declared agent, each in its own home. If the
+    // revocation registry followed the identity, a grant revoked while acting as
+    // one agent would still be honoured while acting as another, on the same
+    // machine, which is not a revocation at all. `--node-home` defaults to
+    // `--home`, so a single-identity install behaves exactly as before.
     let mut home: Option<String> = None;
+    let mut node_home: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--home" && i + 1 < args.len() {
             home = Some(args[i + 1].clone());
             args.remove(i);
             args.remove(i);
+        } else if args[i] == "--node-home" && i + 1 < args.len() {
+            node_home = Some(args[i + 1].clone());
+            args.remove(i);
+            args.remove(i);
         } else {
             i += 1;
         }
     }
-    if let Some(h) = home {
+    if let Some(h) = home.clone() {
         std::env::set_var("IFLOW_HOME", h);
+    }
+    if let Some(n) = node_home.or(home) {
+        std::env::set_var("IFLOW_NODE_HOME", n);
     }
     if args.len() < 2 {
         print_usage();
@@ -93,9 +122,13 @@ fn print_usage() {
         "iflow-id — iFlow trust root (P1 + P2)\n\
          \n\
          usage:\n\
-         \x20 iflow-id [--home <dir>] <command> [args...]\n\
+         \x20 iflow-id [--home <dir>] [--node-home <dir>] <command> [args...]\n\
          \n\
-         \x20 --home <dir>   identity store location (default ~/.iflow)\n\
+         \x20 --home <dir>        identity store location (default ~/.iflow)\n\
+         \x20 --node-home <dir>   node-wide state: revocations, pricing.\n\
+         \x20                     Defaults to --home. Set it when one machine\n\
+         \x20                     holds several identities, so a revocation\n\
+         \x20                     cannot be sidestepped by signing as another.\n\
          \n\
          commands:\n\
          \x20 create [label]          generate & persist did:key identity\n\
@@ -643,14 +676,12 @@ fn hex(bytes: &[u8]) -> String {
 
 // ── token usage metering (P4 / DESIGN §4.2) ────────────────────────────────
 
-/// Pricing table path: `<home>/.iflow/pricing.json` (same home resolution as
-/// the identity store). The plugin points `--home` at its workspace root.
+/// Pricing table path: `<node-home>/.iflow/pricing.json`.
+///
+/// Node-wide, not per-identity: a rate card describes what this machine's
+/// compute costs, which does not change because a different key is signing.
 fn pricing_path() -> std::path::PathBuf {
-    let home = std::env::var("IFLOW_HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".iflow").join("pricing.json")
+    std::path::PathBuf::from(node_home()).join(".iflow").join("pricing.json")
 }
 
 fn cmd_usage(args: &[String]) -> Result<(), String> {

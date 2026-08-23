@@ -580,13 +580,24 @@ pub enum RevokeVerdict {
     Revoked,
 }
 
-/// The registry file location: `<home>/.iflow/revocations.json`.
+/// The registry file under a given node home.
+///
+/// Pure on purpose: where "the node" is, is the caller's business. A path
+/// builder that reads the environment can only be tested by mutating global
+/// state, which races every other test in the process.
+pub fn registry_path_in(node_home: &std::path::Path) -> std::path::PathBuf {
+    node_home.join(".iflow").join("revocations.json")
+}
+
+/// The registry file location: `<node-home>/.iflow/revocations.json`.
+///
+/// Deliberately NOT per-identity. One machine now holds several keys — a
+/// principal plus one per declared agent — and a revocation that only applied
+/// to the key that recorded it would be trivially defeated by acting as
+/// another agent on the same machine. A revocation is a statement about a
+/// grant, not about a signer.
 pub fn registry_path() -> std::path::PathBuf {
-    let home = std::env::var("IFLOW_HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".iflow").join("revocations.json")
+    registry_path_in(std::path::Path::new(&crate::node_home()))
 }
 
 /// Load the local revocation registry (empty when the file is absent).
@@ -722,6 +733,31 @@ mod tests {
 
     fn h2_root() -> RootStrength {
         RootStrength { kind: "hwkey".to_string(), ..Default::default() }
+    }
+
+    /// A revocation must bind the machine, not the key that recorded it.
+    ///
+    /// One node now holds several identities — a principal plus one key per
+    /// declared agent, each in its own `--home`. The registry used to live
+    /// beside the identity, so a grant revoked while acting as one agent was
+    /// still honoured while acting as another, on the same machine. That is not
+    /// a revocation; it is a suggestion.
+    #[test]
+    fn revocation_registry_is_node_wide_not_per_identity() {
+        let node = std::path::Path::new("/machine");
+        let agent_a = node.join("agents").join("a");
+        let agent_b = node.join("agents").join("b");
+
+        // Two identities on one machine resolve to one registry.
+        assert_eq!(registry_path_in(node), registry_path_in(node));
+        assert_ne!(registry_path_in(node), registry_path_in(&agent_a));
+        assert_ne!(registry_path_in(&agent_a), registry_path_in(&agent_b));
+
+        // And it lives under the node, never under a key.
+        let registry = registry_path_in(node);
+        assert!(registry.starts_with(node));
+        assert!(!registry.starts_with(&agent_a));
+        assert!(registry.ends_with("revocations.json"));
     }
 
     #[test]
