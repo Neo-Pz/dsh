@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
@@ -382,6 +382,17 @@ export default {
     // plugin worktree; its store stays under <workspace>/.iflow so it remains
     // inside the sandbox's writable root. ──
     let iflowIdResolved = null
+    // Why the last attempt failed, so a degraded node can say so instead of
+    // repeating "binary not found" with no cause attached.
+    let iflowIdFailure = null
+    let iflowIdLastAttempt = 0
+    // A download that failed because a proxy was down, or because the Release
+    // had not been cut yet, must not disable signing for the life of the
+    // process. Retry, but not on every call.
+    const IFI_RETRY_MS = 5 * 60 * 1000
+    // Smaller than any real build of the identity binary. A GitHub error page
+    // is a few KB, which is exactly what this catches.
+    const IFI_MIN_BYTES = 200 * 1024
     const IFI_BIN_DIR = join(pluginRoot, 'rust', 'target', 'release')
     const IFI_BIN_NAME = process.platform === 'win32' ? 'iflow-id.exe' : 'iflow-id'
     const IFI_BIN_URL = process.platform === 'win32'
@@ -393,41 +404,140 @@ export default {
     // install), fetch it from the GitHub Release. Best-effort; local installs
     // that already have the binary never reach this. Errors fall through to the
     // existing "binary not found" path.
+    /**
+     * curl arguments for reaching the Release from this machine.
+     *
+     * `-f` is not optional: without it GitHub's 404 page is written to the
+     * destination and curl still exits 0, leaving a "binary" that is HTML. The
+     * node then fails as a corrupt identity rather than as a download that did
+     * not happen, which is a much harder thing to diagnose.
+     *
+     * The proxy is passed explicitly rather than left to the environment. DSH
+     * may have been started from a shell that never had those variables, and on
+     * a network where GitHub is not directly reachable that is the whole
+     * difference between a signing node and a silently UNSIGNED one.
+     */
+    function curlFetchArgs(dest, url) {
+      const proxy =
+        process.env.HTTPS_PROXY || process.env.https_proxy ||
+        process.env.HTTP_PROXY || process.env.http_proxy ||
+        process.env.ALL_PROXY || process.env.all_proxy
+      const argv = ['curl', '-fsSL', '--retry', '3', '--retry-delay', '2', '-m', '180', '-o', dest, url]
+      if (proxy) argv.push('--proxy', proxy)
+      return argv
+    }
+
     async function fetchIflowIdBinary() {
       try {
         // Ensure the target dir exists on every OS (Node's mkdirSync creates the
         // full parent chain; plain cmd/`mkdir` would not on Windows).
         mkdirSync(IFI_BIN_DIR, { recursive: true })
         const dest = join(IFI_BIN_DIR, IFI_BIN_NAME)
-        const dl = ctx.subprocess.spawn({ argv: ['curl', '-sSL', '-m', '120', '-o', dest, IFI_BIN_URL], cwd: workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } } })
+        const dl = ctx.subprocess.spawn({
+          argv: curlFetchArgs(dest, IFI_BIN_URL),
+          cwd: workspace,
+          stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } },
+          // Every other spawn here gives the child a grace period. Without one a
+          // slow download can be torn down mid-write, leaving a truncated file
+          // that still looks like a binary to the next check.
+          graceMs: 5000,
+        })
         const out = await dl.done
-        return out.exitCode === 0
+        const stderr = dl.collected.stderr ? dl.collected.stderr.readFrom(0).text : ''
+        if (out.exitCode !== 0) {
+          iflowIdFailure = `download failed (curl exit ${String(out.exitCode)}): ${stderr.slice(0, 200) || IFI_BIN_URL}`
+          return false
+        }
+
+        // Trust the file only after looking at it. A short file is an error page
+        // or a truncated write, and installing it would turn a missing identity
+        // into a corrupt one.
+        let size = 0
+        try {
+          size = statSync(dest).size
+        } catch {
+          iflowIdFailure = `download reported success but wrote nothing to ${dest}`
+          return false
+        }
+        if (size < IFI_MIN_BYTES) {
+          iflowIdFailure = `downloaded ${size} bytes from ${IFI_BIN_URL}, too small to be the identity binary`
+          return false
+        }
+
+        // Release assets arrive without the executable bit.
+        if (process.platform !== 'win32') {
+          try {
+            chmodSync(dest, 0o755)
+          } catch (err) {
+            iflowIdFailure = `could not mark ${dest} executable: ${err && err.message ? err.message : String(err)}`
+            return false
+          }
+        }
+
+        iflowIdFailure = null
+        console.log(`iFlow: fetched the identity binary (${size} bytes) to ${dest}`)
+        return true
       } catch (err) {
+        iflowIdFailure = `auto-fetch threw: ${err && err.message ? err.message : String(err)}`
         console.error('iFlow iflow-id auto-fetch failed', err)
         return false
       }
     }
-    async function resolveIflowId() {
-      if (iflowIdResolved !== null) return iflowIdResolved
+
+    /**
+     * Find the identity binary, fetching it once if it is missing.
+     *
+     * Only SUCCESS is cached. A failure used to be permanent for the life of the
+     * process: a node that came up while the proxy was down stayed unsigned
+     * until someone restarted DSH, and dropping the binary in by hand changed
+     * nothing. The filesystem is now re-checked on every call — it is a stat —
+     * and the download is retried on a cooldown.
+     */
+    async function resolveIflowId(force = false) {
+      if (iflowIdResolved) return iflowIdResolved
+
       const cand = join(IFI_BIN_DIR, IFI_BIN_NAME)
       try {
         const resolved = await ctx.subprocess.resolveExecutable(cand)
-        if (resolved) { iflowIdResolved = resolved; return iflowIdResolved }
-      } catch (e) { /* try next */ }
-      // Fresh install with no binary: fetch the CI-built one (one-click).
+        if (resolved) {
+          iflowIdResolved = resolved
+          iflowIdFailure = null
+          return iflowIdResolved
+        }
+      } catch (e) { /* fall through to the download */ }
+
+      const now = Date.now()
+      if (!force && iflowIdLastAttempt > 0 && now - iflowIdLastAttempt < IFI_RETRY_MS) {
+        return false
+      }
+      iflowIdLastAttempt = now
+
       try {
         if (await fetchIflowIdBinary()) {
           const resolved = await ctx.subprocess.resolveExecutable(cand)
-          if (resolved) { iflowIdResolved = resolved; return iflowIdResolved }
+          if (resolved) {
+            iflowIdResolved = resolved
+            return iflowIdResolved
+          }
+          iflowIdFailure = `downloaded to ${cand} but the host will not execute it`
         }
-      } catch (e) { /* leave false */ }
+      } catch (e) {
+        iflowIdFailure = `auto-fetch threw: ${e && e.message ? e.message : String(e)}`
+      }
+
       iflowIdResolved = false
       return iflowIdResolved
     }
 
     async function iflowId(args, timeoutSec = 15) {
       const bin = await resolveIflowId()
-      if (!bin) throw new Error(`iflow-id binary not found (expected ${join(pluginRoot, 'rust', 'target', 'release')})`)
+      if (!bin) {
+        throw new Error(
+          `iflow-id binary not found (expected ${join(pluginRoot, 'rust', 'target', 'release')})` +
+            (iflowIdFailure ? `: ${iflowIdFailure}` : '') +
+            '. Run iflow_fetch_identity to retry now and see why.',
+        )
+      }
       const handle = ctx.subprocess.spawn({
         // --home <workspace> keeps the store at <workspace>/.iflow, inside the
         // sandbox's writable root (the store appends .iflow itself).
@@ -1546,6 +1656,58 @@ export default {
             state: stateName,
             text,
             ...(text.length === 0 ? { error: `task ended in ${stateName} with no output` } : {}),
+          }
+        },
+      }),
+
+      defineTool({
+        name: 'iflow_fetch_identity',
+        description:
+          'iFlow: retry fetching the iflow-id identity binary now and report what happened. ' +
+          'Use this when the log says facts are being journaled UNSIGNED: without the binary this node ' +
+          'has no key material, so its facts cannot be proven off-node.',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              path: { type: 'string' },
+              did: { type: 'string' },
+              error: { type: 'string' },
+            },
+          },
+          render: (_args, value) => [
+            {
+              type: 'text',
+              text: value.ok
+                ? `iFlow identity ready: ${value.did ?? 'no identity created yet'} (${value.path})`
+                : `iFlow identity unavailable: ${value.error}`,
+            },
+          ],
+        },
+        async execute() {
+          // `force` skips the retry cooldown: a human asking for this has just
+          // fixed whatever was broken and wants to know NOW, not in five
+          // minutes.
+          const bin = await resolveIflowId(true)
+          if (!bin) return { ok: false, error: iflowIdFailure ?? 'the binary could not be resolved' }
+
+          // Resolving is not the same as working. The Release has shipped a
+          // binary older than the source before, and an old one prints the
+          // human-readable form where this expects JSON — which surfaced as an
+          // unsigned node rather than as a version mismatch. So prove it.
+          try {
+            identityCache = null
+            const identity = await getIdentity()
+            return { ok: true, path: bin, ...(identity.did ? { did: identity.did } : {}) }
+          } catch (err) {
+            return {
+              ok: false,
+              path: bin,
+              error: `the binary at ${bin} did not answer 'show --json' as expected: ${err && err.message ? err.message : String(err)}`,
+            }
           }
         },
       }),

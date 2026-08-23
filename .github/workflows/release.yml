@@ -6,6 +6,9 @@ name: release
 on:
   push:
     tags: ['v*']
+  # Cutting a Release is the only way the binary reaches users, so it must be
+  # possible to rebuild one without inventing a version.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -37,6 +40,29 @@ jobs:
           # reach crates.io directly. Sed available on all three runner OSes.
           if [ -f .cargo/config.toml ]; then sed -i.bak '/proxy/d' .cargo/config.toml; fi
           cargo build --release
+      # The Release once shipped a binary older than the plugin that calls it:
+      # `show --json` did not exist yet, the old build answered with its human
+      # format, the plugin's JSON parse failed, and every node that installed it
+      # journaled UNSIGNED without saying why. Prove the interface here, where
+      # the failure is one red job instead of a silently degraded network.
+      - name: Verify the binary answers the interface the plugin calls
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/release/${{ matrix.bin }}"
+          HOME_DIR="$(mktemp -d)"
+          "$BIN" --home "$HOME_DIR" create ci-smoke-test
+          OUT="$("$BIN" --home "$HOME_DIR" show --json)"
+          echo "$OUT"
+          node -e '
+            const parsed = JSON.parse(process.argv[1])
+            if (typeof parsed.did !== "string" || !parsed.did.startsWith("did:key:")) {
+              throw new Error("show --json must return a did:key, got: " + process.argv[1])
+            }
+          ' "$OUT"
+          echo "ok: show --json returns a did:key"
+
       - name: Rename binary to platform asset name
         working-directory: rust
         shell: bash
