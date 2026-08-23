@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { chmodSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
@@ -393,8 +393,26 @@ export default {
     // Smaller than any real build of the identity binary. A GitHub error page
     // is a few KB, which is exactly what this catches.
     const IFI_MIN_BYTES = 200 * 1024
-    const IFI_BIN_DIR = join(pluginRoot, 'rust', 'target', 'release')
     const IFI_BIN_NAME = process.platform === 'win32' ? 'iflow-id.exe' : 'iflow-id'
+    // Where a downloaded binary is KEPT.
+    //
+    // Not inside the package. A package directory is replaced wholesale on
+    // every upgrade — pnpm resolves a git dependency to a new content-addressed
+    // directory each time — so a binary fetched into it is gone the next time
+    // the plugin is updated, and the operator copies it in by hand again. Under
+    // the workspace's own `.iflow` it survives upgrades, stays inside the
+    // sandbox's writable root, and sits next to the identity store it belongs
+    // to.
+    const IFI_BIN_DIR = join(workspace, '.iflow', 'bin')
+    // Where a binary may already BE, in priority order: an explicit override,
+    // the download location, then a developer's local `cargo build` inside the
+    // checkout. The last one is why a contributor never has to download
+    // anything, and why a hand-copied binary still works.
+    const IFI_SEARCH_PATHS = [
+      process.env.IFLOW_ID_PATH,
+      join(IFI_BIN_DIR, IFI_BIN_NAME),
+      join(pluginRoot, 'rust', 'target', 'release', IFI_BIN_NAME),
+    ].filter(Boolean)
     const IFI_BIN_URL = process.platform === 'win32'
       ? 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-windows-amd64.exe'
       : process.platform === 'darwin'
@@ -425,6 +443,26 @@ export default {
       const argv = ['curl', '-fsSL', '--retry', '3', '--retry-delay', '2', '-m', '180', '-o', dest, url]
       if (proxy) argv.push('--proxy', proxy)
       return argv
+    }
+
+    /**
+     * Copy a binary found elsewhere into the durable location.
+     *
+     * Best-effort and silent on failure: this is an optimisation for the NEXT
+     * upgrade, and the binary that was just found still works either way.
+     */
+    function adoptIflowIdBinary(from, to) {
+      try {
+        if (statSync(to).size >= IFI_MIN_BYTES) return
+      } catch { /* not there yet, copy it */ }
+      try {
+        mkdirSync(IFI_BIN_DIR, { recursive: true })
+        copyFileSync(from, to)
+        if (process.platform !== 'win32') chmodSync(to, 0o755)
+        console.log(`iFlow: kept a copy of the identity binary at ${to} so upgrades do not lose it`)
+      } catch (err) {
+        console.warn(`iFlow: could not keep a copy of the identity binary at ${to}:`, err && err.message ? err.message : err)
+      }
     }
 
     async function fetchIflowIdBinary() {
@@ -497,14 +535,21 @@ export default {
       if (iflowIdResolved) return iflowIdResolved
 
       const cand = join(IFI_BIN_DIR, IFI_BIN_NAME)
-      try {
-        const resolved = await ctx.subprocess.resolveExecutable(cand)
-        if (resolved) {
-          iflowIdResolved = resolved
-          iflowIdFailure = null
-          return iflowIdResolved
-        }
-      } catch (e) { /* fall through to the download */ }
+      for (const candidate of IFI_SEARCH_PATHS) {
+        try {
+          const resolved = await ctx.subprocess.resolveExecutable(candidate)
+          if (resolved) {
+            iflowIdResolved = resolved
+            iflowIdFailure = null
+            // Found one inside the package (the install hook fetched it, or an
+            // operator copied it in). Keep a copy where upgrades cannot reach:
+            // otherwise the next update replaces the package directory and the
+            // same manual copy is needed all over again.
+            if (resolved !== cand) adoptIflowIdBinary(resolved, cand)
+            return iflowIdResolved
+          }
+        } catch (e) { /* try the next location */ }
+      }
 
       const now = Date.now()
       if (!force && iflowIdLastAttempt > 0 && now - iflowIdLastAttempt < IFI_RETRY_MS) {
@@ -533,7 +578,7 @@ export default {
       const bin = await resolveIflowId()
       if (!bin) {
         throw new Error(
-          `iflow-id binary not found (expected ${join(pluginRoot, 'rust', 'target', 'release')})` +
+          `iflow-id binary not found (looked in ${IFI_SEARCH_PATHS.join(', ')})` +
             (iflowIdFailure ? `: ${iflowIdFailure}` : '') +
             '. Run iflow_fetch_identity to retry now and see why.',
         )

@@ -29,8 +29,8 @@ async function waitFor(predicate, what, timeoutMs = 3000) {
   }
 }
 
-/** A host that never finds the binary and records every process it was asked to run. */
-function createStubContext(workspace, spawns) {
+/** A host that never finds the binary and records what it was asked to run and probe. */
+function createStubContext(workspace, spawns, probed = []) {
   const tools = new Map()
   const routes = new Map()
   const listeners = new Map()
@@ -62,7 +62,8 @@ function createStubContext(workspace, spawns) {
           collected: { stdout: { readFrom: () => ({ text: '' }) }, stderr: { readFrom: () => ({ text: '' }) } },
         }
       },
-      async resolveExecutable() {
+      async resolveExecutable(path) {
+        probed.push(path)
         return undefined
       },
     },
@@ -104,11 +105,13 @@ describe('iflow_fetch_identity', () => {
   let workspace
   let host
   let spawns
+  let probed
 
   before(async () => {
     workspace = mkdtempSync(join(tmpdir(), 'iflow-identity-'))
     spawns = []
-    host = createStubContext(workspace, spawns)
+    probed = []
+    host = createStubContext(workspace, spawns, probed)
     const plugin = (await import(pathToFileURL(BUNDLE).href)).default
     plugin.apply(host.ctx, {})
     await waitFor(() => host.tools.has('iflow_fetch_identity'), 'the tool to register')
@@ -149,6 +152,37 @@ describe('iflow_fetch_identity', () => {
     )
   })
 
+  it('downloads to the workspace, not into the package that gets replaced', async () => {
+    await host.tools.get('iflow_fetch_identity').execute({})
+
+    const curl = spawns.find((spec) => spec.argv[0] === 'curl')
+    const dest = curl.argv[curl.argv.indexOf('-o') + 1]
+
+    // A package directory is replaced wholesale on every upgrade — pnpm
+    // resolves a git dependency to a new content-addressed directory each time
+    // — so a binary fetched into it is gone after the next update and gets
+    // copied back by hand. Under the workspace it survives.
+    assert.ok(
+      dest.startsWith(join(workspace, '.iflow', 'bin')),
+      `the binary must be kept outside the package, got: ${dest}`,
+    )
+    assert.ok(!dest.includes('node_modules'), 'never inside an installed package directory')
+  })
+
+  it('looks where a binary may already be before downloading one', async () => {
+    // The download location first, then a developer's own `cargo build` inside
+    // the checkout — which is why a contributor never downloads anything, and
+    // why a hand-copied binary keeps working.
+    assert.ok(
+      probed.some((path) => path.startsWith(join(workspace, '.iflow', 'bin'))),
+      `it must probe the workspace location, probed: ${probed.join(', ')}`,
+    )
+    assert.ok(
+      probed.some((path) => path.includes(join('rust', 'target', 'release'))),
+      'and a local cargo build in the checkout',
+    )
+  })
+
   it('retries rather than staying broken until a restart', async () => {
     const before = spawns.filter((spec) => spec.argv[0] === 'curl').length
     await host.tools.get('iflow_fetch_identity').execute({})
@@ -170,5 +204,15 @@ describe('the fetch rules that ship', () => {
     const bundle = readFileSync(BUNDLE, 'utf8')
 
     assert.match(bundle, /too small to be the identity binary/)
+  })
+})
+
+describe('an operator override', () => {
+  it('is read from IFLOW_ID_PATH before anything else', () => {
+    const bundle = readFileSync(BUNDLE, 'utf8')
+
+    // The escape hatch for a machine that cannot reach the Release at all:
+    // build or copy the binary anywhere, point at it, done.
+    assert.match(bundle, /IFLOW_ID_PATH/)
   })
 })
