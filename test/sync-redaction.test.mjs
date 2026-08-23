@@ -32,8 +32,17 @@ function event(overrides = {}) {
     issuer: { id: 'node-1', kind: 'agent' },
     subject: { kind: 'task', id: 'task-1' },
     payload: { title: 'Refactor the billing exporter', ownerAgentId: 'agent-1' },
+    // Where the origin actually puts a signature. The earlier fixture used a
+    // top-level field, so this file asserted against an envelope shape that
+    // does not exist — and passed while the code deleted nothing.
+    evidence: { source: 'dsh' },
     ...overrides,
   }
+}
+
+/** An event as the journal writes it once this node can sign. */
+function signedEvent(overrides = {}) {
+  return event({ evidence: { source: 'dsh', signature: 'FdUJCRv8hz9vhMM33qq05ovWhOEeyVnW' }, ...overrides })
 }
 
 describe('redaction before upload', () => {
@@ -67,29 +76,40 @@ describe('redaction before upload', () => {
   })
 
   it('drops the signature rather than shipping one that cannot verify', () => {
-    const out = redactEvent(event({ signature: 'base64url-signature' }), 'structural')
+    const out = redactEvent(signedEvent(), 'structural')
 
     // A signature over a body that no longer matches would make a verifier
-    // report a FORGERY. Absent is the honest answer; the signed original stays
-    // on the node.
-    assert.equal(out.signature, undefined)
+    // report a FORGERY — worse than "unsigned", and a false accusation against
+    // a node that reported honestly. Absent is the answer; the signed original
+    // stays on the node.
+    assert.equal(out.evidence.signature, undefined)
+    assert.equal(out.evidence.source, 'dsh', 'the rest of the evidence is not collateral damage')
     assert.ok(out.redaction)
   })
 
+  it('leaves the signature alone when there was nothing to redact', () => {
+    // Most facts carry no free text at all. Those go up exactly as journaled,
+    // signature intact — redaction must not cost the network verifiability it
+    // could have kept.
+    const out = redactEvent(signedEvent({ type: 'task.completed', payload: {} }), 'structural')
+
+    assert.equal(out.evidence.signature, 'FdUJCRv8hz9vhMM33qq05ovWhOEeyVnW')
+    assert.equal(out.redaction, undefined)
+  })
+
   it('leaves the event untouched when the operator asked for full text', () => {
-    const original = event({ signature: 'base64url-signature' })
+    const original = signedEvent()
     const out = redactEvent(original, 'full')
 
     assert.equal(out, original)
     assert.equal(out.payload.title, 'Refactor the billing exporter')
-    assert.equal(out.signature, 'base64url-signature')
+    assert.equal(out.evidence.signature, 'FdUJCRv8hz9vhMM33qq05ovWhOEeyVnW')
   })
 
   it('does not invent a redaction note when there was nothing to redact', () => {
     const out = redactEvent(event({ type: 'task.completed', payload: {} }), 'structural')
 
     assert.equal(out.redaction, undefined)
-    assert.equal(out.signature, undefined)
   })
 })
 
@@ -106,7 +126,7 @@ describe('the community sink', () => {
     }
 
     const sink = createCommunitySink({ url: 'https://api.example.com/', token: 'tok', visibility: 'structural' })
-    const result = await sink.publish([event()])
+    const result = await sink.publish([signedEvent()])
 
     assert.deepEqual(result.acceptedEventIds, ['evt-1'])
     assert.equal(seen[0].url, 'https://api.example.com/v1/edge/events')
@@ -114,6 +134,7 @@ describe('the community sink', () => {
 
     const uploaded = JSON.parse(seen[0].init.body)
     assert.match(uploaded.payload.title, /redacted/, 'the sink must not upload raw free text')
+    assert.equal(uploaded.evidence.signature, undefined, 'nor a signature that no longer matches the body')
   })
 
   it('throws on a refusal, so the outbox keeps everything queued', async () => {

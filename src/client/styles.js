@@ -72,6 +72,38 @@ export const STYLES = `
 .ifp-posture { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
 .ifp-posture div { font-size: 12px; }
 .ifp-posture b { display: block; font-weight: 550; font-size: 13px; margin-bottom: 2px; }
+/* The sidebar button and the overlay it opens. */
+.ifp-launcher {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 0; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--dsw-alias-label-primary, inherit);
+  font-family: inherit; font-size: 13px; text-align: left;
+}
+.ifp-launcher:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05)); }
+.ifp-launcher.narrow { justify-content: center; padding: 7px 4px; }
+.ifp-launcher-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ifp-scrim {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(15, 17, 21, .38);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 48px 24px; overflow-y: auto;
+}
+.ifp-sheet {
+  position: relative; width: 100%; max-width: 640px;
+  background: var(--dsw-alias-bg-base, #fff);
+  border: 1px solid var(--dsw-alias-border-l1, #e3e6ea);
+  border-radius: 14px; padding: 24px 26px 20px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.22);
+}
+.ifp-close {
+  position: absolute; top: 12px; right: 14px;
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 22px; line-height: 1; padding: 4px 8px; border-radius: 6px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+.ifp-close:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); }
+
 `
 
 let injected = false

@@ -32,10 +32,11 @@ const REDACTED = '[redacted at origin]'
 /**
  * Return the event as it should leave this machine.
  *
- * A redacted event is NOT the signed original, and it says so: the signature is
- * dropped and a `redaction` note takes its place. Keeping a signature over a
- * body that no longer matches it would be worse than having none — a verifier
- * would report a forgery, which is precisely the wrong answer.
+ * A redacted event is NOT the signed original, and it says so: the origin
+ * signature at `evidence.signature` is dropped and a `redaction` note takes its
+ * place. Keeping a signature over a body that no longer matches would be worse
+ * than having none — a verifier would report a forgery, which is precisely the
+ * wrong answer, and an accusation against a node that did nothing wrong.
  *
  * The signed original never moves. It stays in this node's journal, which is
  * where an audit that needs the full text has to look, with the node's consent.
@@ -53,7 +54,16 @@ export function redactEvent(event, visibility) {
   for (const key of removed) redactedPayload[key] = REDACTED
 
   const copy = { ...event, payload: redactedPayload }
-  delete copy.signature
+
+  // The signature lives at `evidence.signature`, and it covers the body that is
+  // about to change. Leaving it on a redacted event would make a verifier
+  // report a FORGERY — a much worse answer than "unsigned", and a false
+  // accusation against the node that honestly reported the fact.
+  if (copy.evidence && copy.evidence.signature) {
+    const { signature, ...rest } = copy.evidence
+    copy.evidence = rest
+  }
+
   copy.redaction = {
     fields: removed.map((key) => `payload.${key}`),
     reason: 'free text is not published by default; the signed original stays on the origin node',

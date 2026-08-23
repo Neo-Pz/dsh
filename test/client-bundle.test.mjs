@@ -73,10 +73,15 @@ describe('the client bundle DSH loads', () => {
     assert.ok(manifest.files.includes('lib'))
   })
 
-  it('takes a settings page rather than a seat people click by accident', () => {
-    // `settings.section` is a page someone visits deliberately. The publish
-    // gate does not belong in the conversation dock.
+  it('is reachable from the app, not only from Settings', () => {
+    // A publish gate nobody can find is a gate that does not work. The state of
+    // this machine has to be visible without opening anything, so the button
+    // sits beside Settings and the panel opens over the app.
+    assert.match(bundle, /sidebar\.footer\.action/)
+    assert.match(bundle, /shell\.overlay/)
+    // And it stays available as a settings page for someone who goes looking.
     assert.match(bundle, /settings\.section/)
+    // But never in the composer, where it would be clicked by accident.
     assert.ok(!bundle.includes('conversation.input.dock'))
   })
 })
