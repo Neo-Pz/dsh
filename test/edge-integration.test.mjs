@@ -16,6 +16,19 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
+/**
+ * No test may reach the network.
+ *
+ * Booting the plugin resolves the identity binary, and when the stub host
+ * cannot produce one the download falls back to Node's fetch. Left unanswered
+ * that is a real HTTP request to GitHub, which makes this suite slow, flaky,
+ * and dependent on the machine running it having internet.
+ */
+globalThis.fetch = async () => {
+  throw new Error('network disabled in tests')
+}
+
+
 /** Every fact the edge has journaled, parsed. */
 function readOriginJournal(workspace) {
   const path = join(workspace, '.iflow', 'edge', 'origin.ndjson')

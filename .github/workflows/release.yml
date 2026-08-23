@@ -1,8 +1,9 @@
 name: release
 
-# Build the Rust `iflow-id` identity binary for the three OSes on every tag
-# push (v*) and attach it to the matching GitHub Release. This is what lets a
-# user get a prebuilt binary with "one-click install" instead of building Rust.
+# Build the Rust `iflow-id` identity binary for every platform the plugin can
+# run on, and attach it to the matching GitHub Release. This is what makes
+# "install the plugin" enough: without a matching asset a user needs a Rust
+# toolchain, and a node with no identity journals facts nobody can verify.
 on:
   push:
     tags: ['v*']
@@ -16,41 +17,85 @@ permissions:
 jobs:
   build:
     strategy:
+      # One platform failing must not withhold the others: someone on a working
+      # platform should not wait on a fix for one they do not use.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
             bin: iflow-id.exe
             asset: iflow-id-windows-amd64.exe
+            native: true
+
+          # musl, statically linked. This crate has no C dependencies at all
+          # (ed25519-dalek, sha2, serde — pure Rust), so a static build costs
+          # nothing and settles the question permanently: the glibc-linked
+          # binary this job used to produce required GLIBC_2.34, which excludes
+          # Debian 11 and anything older, and quietly tracked whatever the
+          # runner image upgraded to next. A static binary runs on every Linux,
+          # Alpine included.
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
             bin: iflow-id
             asset: iflow-id-linux-amd64
+            native: true
+
+          # Debian on ARM is not a rarity — it is every Raspberry Pi and most
+          # cheap cloud instances. Without this asset the plugin downloaded an
+          # x86-64 binary and failed with a format error.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bin: iflow-id
+            asset: iflow-id-linux-arm64
+            native: true
+
+          # macos-latest is Apple Silicon. The asset built here used to be named
+          # `darwin-amd64` while actually being arm64, so an Intel Mac
+          # downloaded a binary it could not execute.
           - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: iflow-id
+            asset: iflow-id-darwin-arm64
+            native: true
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
             bin: iflow-id
             asset: iflow-id-darwin-amd64
+            # Cross-built on an arm64 runner; executing it would need Rosetta,
+            # which the image does not guarantee.
+            native: false
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       - name: Build iflow-id (release)
         working-directory: rust
         shell: bash
         run: |
           # The repo's rust/.cargo/config.toml pins HTTP_PROXY to 127.0.0.1 for the
           # author's machine; CI has no such proxy, so drop that line and let cargo
-          # reach crates.io directly. Sed available on all three runner OSes.
+          # reach crates.io directly. Sed available on all runner OSes.
           if [ -f .cargo/config.toml ]; then sed -i.bak '/proxy/d' .cargo/config.toml; fi
-          cargo build --release
+          cargo build --release --target ${{ matrix.target }}
+
       # The Release once shipped a binary older than the plugin that calls it:
       # `show --json` did not exist yet, the old build answered with its human
       # format, the plugin's JSON parse failed, and every node that installed it
       # journaled UNSIGNED without saying why. Prove the interface here, where
       # the failure is one red job instead of a silently degraded network.
       - name: Verify the binary answers the interface the plugin calls
+        if: matrix.native
         working-directory: rust
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/release/${{ matrix.bin }}"
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           HOME_DIR="$(mktemp -d)"
           "$BIN" --home "$HOME_DIR" create ci-smoke-test
           OUT="$("$BIN" --home "$HOME_DIR" show --json)"
@@ -63,10 +108,28 @@ jobs:
           ' "$OUT"
           echo "ok: show --json returns a did:key"
 
+      # A Linux asset that turned out to be dynamically linked would reintroduce
+      # the glibc coupling the musl target exists to remove, and it would do it
+      # silently — the binary would still run here, and fail on the user's
+      # older distribution.
+      - name: Assert the Linux binaries are static
+        if: contains(matrix.target, 'linux-musl')
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          file "$BIN"
+          if file "$BIN" | grep -q "dynamically linked"; then
+            echo "::error::$BIN is dynamically linked; it would carry a glibc requirement"
+            exit 1
+          fi
+
       - name: Rename binary to platform asset name
         working-directory: rust
         shell: bash
-        run: cp target/release/${{ matrix.bin }} ${{ matrix.asset }}
+        run: cp target/${{ matrix.target }}/release/${{ matrix.bin }} ${{ matrix.asset }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

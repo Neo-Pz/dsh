@@ -415,11 +415,30 @@ export default {
       join(IFI_BIN_DIR, IFI_BIN_NAME),
       join(pluginRoot, 'rust', 'target', 'release', IFI_BIN_NAME),
     ].filter(Boolean)
-    const IFI_BIN_URL = process.platform === 'win32'
-      ? 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-windows-amd64.exe'
-      : process.platform === 'darwin'
-        ? 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-darwin-amd64'
-        : 'https://github.com/Neo-Pz/dsh/releases/latest/download/iflow-id-linux-amd64'
+    /**
+     * Which Release asset belongs to this machine.
+     *
+     * Architecture is part of the answer, not a detail. Choosing on platform
+     * alone sent every Linux an x86-64 binary — including every Raspberry Pi
+     * and ARM cloud instance running Debian — where it downloaded fine, passed
+     * a size check, and then failed to execute with a message about file
+     * format that told nobody anything.
+     *
+     * An unsupported pair returns undefined rather than guessing. "There is no
+     * build for linux/riscv64" is a sentence someone can act on; a binary that
+     * cannot run is not.
+     */
+    const IFI_ASSETS = {
+      'win32/x64': 'iflow-id-windows-amd64.exe',
+      'darwin/arm64': 'iflow-id-darwin-arm64',
+      'darwin/x64': 'iflow-id-darwin-amd64',
+      'linux/x64': 'iflow-id-linux-amd64',
+      'linux/arm64': 'iflow-id-linux-arm64',
+    }
+    const IFI_ASSET = IFI_ASSETS[`${process.platform}/${process.arch}`]
+    const IFI_BIN_URL = IFI_ASSET
+      ? `https://github.com/Neo-Pz/dsh/releases/latest/download/${IFI_ASSET}`
+      : undefined
     // One-click convenience: when the CI-built binary is missing (fresh npm/git
     // install), fetch it from the GitHub Release. Best-effort; local installs
     // that already have the binary never reach this. Errors fall through to the
@@ -467,26 +486,69 @@ export default {
       }
     }
 
+    /**
+     * Download without curl.
+     *
+     * A minimal Debian or a slim container image frequently has no curl at all,
+     * and "one-click install" that depends on an optional package is not one.
+     * Node's own fetch has no proxy support, which is why curl is still tried
+     * first — but no proxy is a milder problem than no downloader.
+     */
+    async function fetchWithNode(dest, url) {
+      // curl was given `-m 180`; the fallback needs the same ceiling. A
+      // download with no deadline can hold the edge's start-up open forever on
+      // a network that accepts the connection and then says nothing.
+      const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(180_000) })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} from ${url}`)
+      }
+      writeFileSync(dest, Buffer.from(await response.arrayBuffer()))
+    }
+
     async function fetchIflowIdBinary() {
+      if (!IFI_BIN_URL) {
+        iflowIdFailure =
+          `no prebuilt identity binary is published for ${process.platform}/${process.arch}. ` +
+          'Build it with `cargo build --release` in the plugin\'s rust/ directory and point ' +
+          'IFLOW_ID_PATH at the result.'
+        return false
+      }
       try {
         // Ensure the target dir exists on every OS (Node's mkdirSync creates the
         // full parent chain; plain cmd/`mkdir` would not on Windows).
         mkdirSync(IFI_BIN_DIR, { recursive: true })
         const dest = join(IFI_BIN_DIR, IFI_BIN_NAME)
-        const dl = ctx.subprocess.spawn({
-          argv: curlFetchArgs(dest, IFI_BIN_URL),
-          cwd: workspace,
-          stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } },
-          // Every other spawn here gives the child a grace period. Without one a
-          // slow download can be torn down mid-write, leaving a truncated file
-          // that still looks like a binary to the next check.
-          graceMs: 5000,
-        })
-        const out = await dl.done
-        const stderr = dl.collected.stderr ? dl.collected.stderr.readFrom(0).text : ''
-        if (out.exitCode !== 0) {
-          iflowIdFailure = `download failed (curl exit ${String(out.exitCode)}): ${stderr.slice(0, 200) || IFI_BIN_URL}`
-          return false
+
+        let curlFailure = null
+        try {
+          const dl = ctx.subprocess.spawn({
+            argv: curlFetchArgs(dest, IFI_BIN_URL),
+            cwd: workspace,
+            stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 256 * 1024 } },
+            // Every other spawn here gives the child a grace period. Without one
+            // a slow download can be torn down mid-write, leaving a truncated
+            // file that still looks like a binary to the next check.
+            graceMs: 5000,
+          })
+          const out = await dl.done
+          const stderr = dl.collected.stderr ? dl.collected.stderr.readFrom(0).text : ''
+          if (out.exitCode !== 0) {
+            curlFailure = `curl exit ${String(out.exitCode)}: ${stderr.slice(0, 200) || IFI_BIN_URL}`
+          }
+        } catch (err) {
+          // curl is not installed, or the host refused to spawn it.
+          curlFailure = err && err.message ? err.message : String(err)
+        }
+
+        if (curlFailure) {
+          try {
+            await fetchWithNode(dest, IFI_BIN_URL)
+          } catch (err) {
+            iflowIdFailure =
+              `download failed (${curlFailure}); the fallback also failed: ` +
+              (err && err.message ? err.message : String(err))
+            return false
+          }
         }
 
         // Trust the file only after looking at it. A short file is an error page
