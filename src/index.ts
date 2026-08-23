@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
 import { clearCommunitySettings, loadCommunitySettings, saveCommunitySettings } from './edge/community-config.js'
 import { installPanelRoutes } from './edge/panel.js'
+import { agentDidsOf, agentHome, homeForSigning, loadDeclarations, principalHome, saveDeclarations } from './identity/keyring.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
 import {
   TERMINAL_TASK_STATES,
@@ -698,7 +699,27 @@ export default {
       return iflowIdResolved
     }
 
-    async function iflowId(args, timeoutSec = 15) {
+    /**
+     * Run the identity binary.
+     *
+     * `home` selects WHICH key acts. This node holds several: its own, the
+     * Principal's, and one per declared Agent — each in its own directory,
+     * because that is how the binary partitions its store. Omitted means the
+     * node's own key, which is every caller that predates declared Agents.
+     *
+     * `--node-home` is always the workspace, whatever key is signing: the
+     * revocation registry and the rate card describe this machine, not a key.
+     * Without it, a grant revoked while acting as one Agent would still be
+     * honoured while acting as another.
+     */
+    async function iflowId(args, homeOrTimeout, maybeTimeout) {
+      // Two shapes, because the timeout argument predates the home one:
+      //   iflowId(args, 20)            a longer timeout, node's own key
+      //   iflowId(args, home)          another key, default timeout
+      //   iflowId(args, home, 20)      both
+      const home = typeof homeOrTimeout === 'string' ? homeOrTimeout : undefined
+      const timeoutSec = typeof homeOrTimeout === 'number' ? homeOrTimeout : (maybeTimeout ?? 15)
+
       const bin = await resolveIflowId()
       if (!bin) {
         throw new Error(
@@ -708,9 +729,9 @@ export default {
         )
       }
       const handle = ctx.subprocess.spawn({
-        // --home <workspace> keeps the store at <workspace>/.iflow, inside the
-        // sandbox's writable root (the store appends .iflow itself).
-        argv: [bin, '--home', workspace, ...args],
+        // --home keeps the store inside the sandbox's writable root (the store
+        // appends .iflow itself); --node-home keeps revocations node-wide.
+        argv: [bin, '--home', home ?? workspace, '--node-home', workspace, ...args],
         cwd: workspace,
         stdio: { stdin: 'ignore', stdout: { maxBytes: 4 * 1024 * 1024 }, stderr: { maxBytes: 256 * 1024 } },
         graceMs: 5000,
@@ -2294,6 +2315,10 @@ export default {
     async function startEdge() {
       const identity = await getIdentity()
       const community = await resolveCommunity()
+      // Who this node speaks for. An Agent exists because a person declared it;
+      // a node that has declared nothing still runs, and still journals, under
+      // its own key alone.
+      const declarations = await loadDeclarations(ctx, join, workspace)
       return installIFlowEdge(ctx, {
         workspace,
         alias: state.alias,
@@ -2304,7 +2329,12 @@ export default {
         capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
         // The edge signs through the same binary the rest of the plugin uses,
         // so there is exactly one place that holds key material.
-        runIflowId: (args) => iflowId(args),
+        runIflowId: (args, home) => iflowId(args, home),
+        // Which Agents this node has declared, and which key each one signs
+        // with. Read once per edge start: declaring an Agent restarts the edge,
+        // so this cannot go stale behind the journal's back.
+        agentDids: agentDidsOf(declarations),
+        resolveSigningHome: (context) => homeForSigning(join, workspace, declarations, context),
         writeScratch: async (name, bytes) => {
           const path = scratchPath(name)
           writeFileSync(path, Buffer.from(bytes))
@@ -2385,8 +2415,37 @@ export default {
       // token configured therefore means no remote access at all.
       authorizeRemote: (request) => state.token !== null && authorized(request),
 
+      async declarePrincipal(label) {
+        try {
+          const principal = await declarePrincipal(ctx, join, workspace, (a, home) => iflowId(a, home), label)
+          return { ok: true, principal }
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
+      async declareAgent(input) {
+        try {
+          const { declared } = await declareAgent(ctx, join, workspace, (a, home) => iflowId(a, home, 30), {
+            agentId: input?.agentId,
+            label: input?.label,
+            capabilities: Array.isArray(input?.capabilities) ? input.capabilities : [],
+            level: input?.level,
+            ttlSeconds: input?.ttlSeconds,
+          })
+          // A new key changes who this edge can sign as, and the descriptor is
+          // read once at start. Restart so the Agent can act immediately rather
+          // than at the next reboot.
+          await restartEdge()
+          return { ok: true, agent: declared }
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
       async state() {
         const community = await resolveCommunity()
+        const declarations = await loadDeclarations(ctx, join, workspace)
         const identity = await (async () => {
           try {
             const id = await getIdentity()
@@ -2416,6 +2475,17 @@ export default {
             ? { url: community.url, visibility: community.visibility, enabledAt: community.enabledAt ?? null }
             : null,
           claimInProgress: pendingClaim ? { userCode: pendingClaim.userCode, expiresAt: pendingClaim.expiresAt } : null,
+          // Who this node speaks for. An Agent is here because a person
+          // declared it; `localAgents` above counts what the runtime is doing,
+          // which is a different question.
+          principal: declarations.principal,
+          declaredAgents: declarations.agents.map((a) => ({
+            agentId: a.agentId,
+            label: a.label,
+            did: a.did,
+            capabilities: a.capabilities ?? [],
+            grantRef: a.grantRef,
+          })),
           // Read-only. These are security posture, not preferences, and the
           // panel shows them so an operator can see what this node accepts —
           // it does not offer to change them.

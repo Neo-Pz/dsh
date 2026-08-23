@@ -57,7 +57,11 @@ function deriveNodeId(workspace) {
  * @param options.community    { url, token, visibility, intervalMs } — when set,
  *                           the outbox is flushed to that Community. Absent by
  *                           default: installing this plugin publishes nothing.
- * @param options.runIflowId   invoke the identity binary (args -> stdout)
+ * @param options.agentDids    DID of each declared Agent, by id
+ * @param options.resolveSigningHome  which key directory a signing context
+ *                           belongs to; undefined means this node holds no
+ *                           such key and the event must go unsigned
+ * @param options.runIflowId   invoke the identity binary (args[, home] -> stdout)
  * @param options.writeScratch persist bytes for the binary to read, return path
  */
 export async function installIFlowEdge(ctx, options) {
@@ -75,6 +79,9 @@ export async function installIFlowEdge(ctx, options) {
     selfAgentId: `node-${nodeId}`,
     selfAgentLabel: options.alias ?? 'iflow-edge',
     did: options.did ?? undefined,
+    // The DID of every Agent an operator declared on this node, so an event one
+    // of them issues carries the key a verifier should check it against.
+    agentDids: options.agentDids ?? undefined,
   }
 
   // Sign at the origin when the identity binary is usable. An edge with no
@@ -83,7 +90,16 @@ export async function installIFlowEdge(ctx, options) {
   let signer
   let verifier
   if (typeof options.runIflowId === 'function' && typeof options.writeScratch === 'function') {
-    const io = { run: options.runIflowId, writeScratch: options.writeScratch, logger: ports.logger }
+    const io = {
+      run: options.runIflowId,
+      writeScratch: options.writeScratch,
+      logger: ports.logger,
+      // Which key signs is decided by whoever the event is attributed to. A
+      // context this node holds no key for is refused, not substituted: the
+      // journal then records the fact unsigned, which is honest, where a
+      // signature by the wrong key would be a false attribution.
+      resolveHome: options.resolveSigningHome,
+    }
     signer = createIflowIdSigner(io)
     verifier = createIflowIdVerifier(io)
     try {

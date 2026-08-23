@@ -114,6 +114,16 @@ export function installPanelRoutes(ctx, webServer, deps) {
     ['/iflow/panel/identity/fetch', 'POST', guard(async (_request, response) => {
       send(response, 200, await deps.fetchIdentity())
     }, { write: true })],
+
+    ['/iflow/panel/principal/declare', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.declarePrincipal(body.label))
+    }, { write: true })],
+
+    ['/iflow/panel/agents/declare', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.declareAgent(body))
+    }, { write: true })],
   ]
 
   for (const [path, method, handler] of routes) {
