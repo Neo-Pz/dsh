@@ -137,6 +137,10 @@ cargo build --release --manifest-path F:\i_Flow_One\deepseek-harness\.local\plug
   `signableBytes(event)`——信封去掉接收方可添加的 `journalOffset` / `observedAt`，
   再去掉签名本身。密钥不进 Node 进程，由 `iflow-id sign-blob` 处理。没有身份时
   仍然记账，但计入 `journal.unsignedWriteCount` 并在启动时告警，不静默降级。
+- **上线是面板上的一次点击，不是改配置。** DSH 设置里的 `iFlow · 弗流` 页（插件的浏览器半边，`src/client/`，挂在 `settings.section` 插槽）负责这件事：先展示本机发现了什么、身份能不能签名，点「上线」时列出会上传/会脱敏/永不离开三类内容，确认后走设备码 Claim——短码显示在本机，人在浏览器里确认，凭据由 Community 直接发给这个节点，全程无人接触密钥。
+- **`.iflow/community.json` 优先于 `config.community`。** 配置只是"没人做过决定"时的默认值；一旦有人在这台机器的面板上选过，那个选择说了算。「已停止」和「从未决定」是两个不同的存储状态——否则面板上点了下线，重启后又被配置拉回上线。文件损坏读作「已停止」：读不出自己设置的节点不该靠发布来消解这个疑问。
+- **面板的写路由只答本机。** 校验回环地址，或持有本节点 bearer token 的调用者。特别注意它**不复用** `authorized()`——那个函数在未设 token 时对所有人返回 true（对回环读 API 是对的），照搬会导致"没设 token 的节点，局域网里任何人都能替它上线"。
+- **安全姿态不进面板。** `acceptCommands`、`routeApprovals`、`hubOrigins` 只在配置文件里改，面板只读显示。给不理解含义的人一个「接受远程命令」的一键开关，比让他去查文档改配置更危险。
 - **iflow-id 二进制放在 `<workspace>/.iflow/bin/`，不在包目录里。** 包目录每次升级都会被整个替换（pnpm 把 git 依赖解析成新的内容寻址目录），落在里面的二进制升一次级就没了，于是每次都要手动复制。查找顺序是 `IFLOW_ID_PATH` 环境变量 → `<workspace>/.iflow/bin/` → checkout 里的 `rust/target/release/`（开发者本地 cargo build）；在后两处找到的会被复制到第一处，所以手动复制最多发生一次。找不到时调 `iflow_fetch_identity`，它会立即重试并说明卡在哪一步。
 - 命令通道同样默认关闭。`config.acceptCommands: true` 才会让 `POST /iflow/command` 真正执行任何动作；`config.routeApprovals: true` 才会让 Task Room 参与审批（它与 DSH 本地审批**并行竞速**，先答者胜，不会绕过本地授权点）。
 - **命令通道无 token 不开门。** 这条唯一的写路由在没有共享 token 时返回 `503`，而不是像读 API 那样"没配 token 就放行"——否则 `acceptCommands: true` 且未设 token 的节点，任何能连到该端口的人都能取消任务（默认只有 loopback，但离 `--host 0.0.0.0` 只差一步）。token 可以用 `config.token` 在启动时给，也可以随时用 `iflow_set_token` 设置/清除：edge 每次请求都读插件的当前值，不是安装那一刻的快照。

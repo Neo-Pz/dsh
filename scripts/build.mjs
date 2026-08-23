@@ -56,3 +56,8 @@ await build({
   ],
   logLevel: 'info',
 })
+
+// The browser half is part of the same artifact: DSH loads `lib/index.js` and
+// `lib/client.js` from one install, and shipping a stale one of the pair is
+// the kind of mismatch that only shows up in someone else's browser.
+await import('./build-client.mjs')

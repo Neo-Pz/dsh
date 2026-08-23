@@ -20,6 +20,11 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "immediately": false
     }
   },
   "peerDependencies": {
@@ -47,5 +52,11 @@
     "iflow-adapter-sdk": "^0.1.0",
     "iflow-domain": "^0.1.0",
     "iflow-protocol": "^0.1.0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
   }
 }
