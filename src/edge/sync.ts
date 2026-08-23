@@ -113,6 +113,29 @@ export function startCommunitySync(ctx, edge, options) {
   // the journal keeps one copy of every fact rather than two that can drift.
   const resolveEvent = (eventId) => edge.journal.all().find((event) => event.id === eventId)
 
+  /**
+   * Move the journal's `syncedSeq` up to what has actually been delivered.
+   *
+   * The outbox tracks delivery per event; the journal keeps a single watermark,
+   * and nothing was connecting them — so `/iflow/edge/status` reported
+   * `syncedSeq: 0` on a node whose entire outbox had drained, which reads as
+   * "nothing has ever synced".
+   *
+   * The watermark is the last CONTIGUOUS delivered sequence: everything below
+   * the lowest still-queued event. Using the highest delivered seq instead
+   * would claim a gap was synced the moment one late event slipped past an
+   * earlier one.
+   */
+  const advanceWatermark = async () => {
+    const pending = edge.outbox.pending()
+    const watermark = pending.length === 0
+      ? edge.journal.lastSeq
+      : Math.min(...pending.map((entry) => entry.seq)) - 1
+    if (watermark > edge.journal.syncedSeq) {
+      await edge.journal.markSynced(watermark)
+    }
+  }
+
   let running = false
   const flush = async () => {
     if (running) return
@@ -125,6 +148,7 @@ export function startCommunitySync(ctx, edge, options) {
             (result.error ? ` (${result.error})` : ''),
         )
       }
+      await advanceWatermark()
     } catch (err) {
       console.error('iFlow sync failed (facts stay queued):', err && err.message ? err.message : err)
     } finally {
@@ -134,5 +158,9 @@ export function startCommunitySync(ctx, edge, options) {
 
   void flush()
   const timer = setInterval(() => void flush(), everyMs)
+  // A timer that only waits to upload must not be a reason for the process to
+  // stay alive. Without this the host cannot exit while sync is armed, which
+  // shows up as a runtime that will not shut down and as test runs that hang.
+  if (typeof timer.unref === 'function') timer.unref()
   return () => clearInterval(timer)
 }

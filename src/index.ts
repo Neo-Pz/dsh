@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
+import { clearCommunitySettings, loadCommunitySettings, saveCommunitySettings } from './edge/community-config.js'
+import { installPanelRoutes } from './edge/panel.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
 import {
   TERMINAL_TASK_STATES,
@@ -31,7 +33,7 @@ const sourcePath = fileURLToPath(import.meta.url)
 // The shared Bearer token stays as bootstrap/compat; when a signature is
 // present it is verified first (who wrote this, first time or replay).
 export default {
-  inject: ['tools', 'webServer', 'web', 'subprocess', 'sandboxPolicy', 'agents', 'agentDefaultModel', 'agentPresets', 'sessionTitle', 'sessions', 'fs', 'timer'],
+  inject: ['tools', 'webServer', 'subprocess', 'sandboxPolicy', 'agents', 'agentDefaultModel', 'agentPresets', 'sessionTitle', 'sessions', 'fs', 'timer'],
   apply(ctx, config = {}) {
     const webServer = ctx.webServer
     const agents = ctx.agents
@@ -2127,52 +2129,268 @@ export default {
         console.error(`iFlow: could not journal ${what}`, err)
       }
     }
+    /**
+     * Publishing is off until someone turns it on, and `.iflow/community.json`
+     * is where that decision lives.
+     *
+     * The stored file outranks `config.community`: config is the default for a
+     * node nobody has decided about, but once a person has chosen — on this
+     * machine, in the panel — their choice wins over a file they may never have
+     * seen. `{}` from the panel's "stop" means stopped, not "fall back to
+     * config", which is why the absence of a URL here is honoured rather than
+     * treated as unset.
+     */
+    async function resolveCommunity() {
+      const stored = await loadCommunitySettings(ctx, join, workspace)
+      // Decided, and the decision was no. Config does not get to overrule the
+      // person who clicked stop on this machine.
+      if (stored && stored.stopped) return undefined
+      if (stored) return stored
+
+      // Never decided here: fall back to whatever the profile configured.
+      const fromConfig = config.community
+      if (fromConfig && fromConfig.url && fromConfig.token) {
+        return {
+          url: String(fromConfig.url),
+          token: String(fromConfig.token),
+          visibility: fromConfig.visibility === 'full' ? 'full' : 'structural',
+          intervalMs: Number(fromConfig.intervalMs) || 60000,
+        }
+      }
+      return undefined
+    }
+
+    /**
+     * Bring the edge up.
+     *
+     * Extracted so that turning publishing on or off takes effect immediately
+     * instead of at the next restart. Re-running this is safe by construction:
+     * `deriveNodeId` is derived from hostname and workspace, so the node keeps
+     * its identity and its journal continues rather than forking, and the SDK
+     * suppresses a duplicate `agent.registered` when it reopens.
+     */
+    async function startEdge() {
+      const identity = await getIdentity()
+      const community = await resolveCommunity()
+      return installIFlowEdge(ctx, {
+        workspace,
+        alias: state.alias,
+        version: state.syncVersion,
+        did: identity.did,
+        // A getter, not the value: the token can change after this call.
+        token: () => state.token,
+        capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
+        // The edge signs through the same binary the rest of the plugin uses,
+        // so there is exactly one place that holds key material.
+        runIflowId: (args) => iflowId(args),
+        writeScratch: async (name, bytes) => {
+          const path = scratchPath(name)
+          writeFileSync(path, Buffer.from(bytes))
+          return path
+        },
+        allowedOrigins: config.hubOrigins ?? ['http://127.0.0.1:5174', 'http://localhost:5174'],
+        // Both default to off: a Hub can read this node's projections out of
+        // the box, but it cannot cause work here until an operator says so.
+        // These stay in config on purpose — a one-click switch for "accept
+        // remote commands" is more dangerous in the hands of someone who does
+        // not know what it means than an edit they have to look up.
+        acceptCommands: config.acceptCommands === true,
+        routeApprovals: config.routeApprovals === true,
+        community,
+      })
+    }
+
+    let edgeStarting = null
+    async function restartEdge() {
+      // Serialise: two panel clicks in a row must not race two edges onto the
+      // same journal.
+      if (edgeStarting) await edgeStarting.catch(() => {})
+      const previous = edgeHandle
+      edgeHandle = null
+      // Facts observed during the swap are dropped rather than queued —
+      // `observeEdge` already degrades silently — which is the right trade for
+      // a gap measured in milliseconds against a second writer on one journal.
+      if (previous) previous.dispose()
+      edgeStarting = startEdge()
+      try {
+        edgeHandle = await edgeStarting
+        console.log(`iFlow edge restarted: node ${edgeHandle.nodeId}`)
+        return edgeHandle
+      } finally {
+        edgeStarting = null
+      }
+    }
+
     void (async () => {
       try {
-        const identity = await getIdentity()
-        edgeHandle = await installIFlowEdge(ctx, {
-          workspace,
-          alias: state.alias,
-          version: state.syncVersion,
-          did: identity.did,
-          // A getter, not the value: the token can change after this call.
-          token: () => state.token,
-          capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
-          // The edge signs through the same binary the rest of the plugin uses,
-          // so there is exactly one place that holds key material.
-          runIflowId: (args) => iflowId(args),
-          writeScratch: async (name, bytes) => {
-            const path = scratchPath(name)
-            writeFileSync(path, Buffer.from(bytes))
-            return path
-          },
-          allowedOrigins: config.hubOrigins ?? ['http://127.0.0.1:5174', 'http://localhost:5174'],
-          // Both default to off: a Hub can read this node's projections out of
-          // the box, but it cannot cause work here until an operator says so.
-          acceptCommands: config.acceptCommands === true,
-          routeApprovals: config.routeApprovals === true,
-          // Publishing is off until an operator names a Community AND gives it
-          // a token. Installing this plugin sends nothing anywhere; this is the
-          // line between `Local Discover` and going public, and it is crossed
-          // by editing config, never by default.
-          community:
-            config.community && config.community.url && config.community.token
-              ? {
-                  url: String(config.community.url),
-                  token: String(config.community.token),
-                  // Free text ('title', 'reason') is redacted before upload
-                  // unless the operator explicitly asks for 'full'.
-                  visibility: config.community.visibility === 'full' ? 'full' : 'structural',
-                  intervalMs: Number(config.community.intervalMs) || 60000,
-                }
-              : undefined,
-        })
+        edgeStarting = startEdge()
+        edgeHandle = await edgeStarting
         console.log(`iFlow edge ready: node ${edgeHandle.nodeId}, journal .iflow/edge/origin.ndjson, projections on /iflow/projection/*`)
       } catch (err) {
         console.error('iFlow edge failed to start (A2A bridge is unaffected):', err && err.message ? err.message : err)
+      } finally {
+        edgeStarting = null
       }
     })()
     ctx.effect(() => () => { if (edgeHandle) edgeHandle.dispose() })
+
+    // ── The control panel ─────────────────────────────────────────────────
+    // Everything below is the publish gate: what this node would send, whether
+    // it is sending, and the two buttons that change that.
+    const COMMUNITY_DEFAULT_URL = 'https://api.iflowone.com'
+    let pendingClaim = null
+
+    async function communityBaseUrl() {
+      const current = await resolveCommunity()
+      if (current && current.url) return current.url.replace(/\/+$/, '')
+      const configured = config.community && config.community.url
+      return String(configured || COMMUNITY_DEFAULT_URL).replace(/\/+$/, '')
+    }
+
+    async function communityFetch(path, body) {
+      const base = await communityBaseUrl()
+      const out = await curlRaw('POST', `${base}${path}`, body, 30, null)
+      return JSON.parse(out)
+    }
+
+    installPanelRoutes(ctx, webServer, {
+      // A remote caller is refused unless it holds this node's bearer token.
+      //
+      // Note what this does NOT reuse: `authorized()` returns true for
+      // everyone when no token is configured, because that is the right default
+      // for a read API on a loopback port. Applying it here would mean a node
+      // with auth off publishes itself for anyone on the LAN who can POST. No
+      // token configured therefore means no remote access at all.
+      authorizeRemote: (request) => state.token !== null && authorized(request),
+
+      async state() {
+        const community = await resolveCommunity()
+        const identity = await (async () => {
+          try {
+            const id = await getIdentity()
+            return { ready: Boolean(id.did), did: id.did ?? null, error: null }
+          } catch (err) {
+            return { ready: false, did: null, error: err && err.message ? err.message : String(err) }
+          }
+        })()
+
+        const edge = edgeHandle
+        const journal = edge
+          ? { nodeId: edge.nodeId, lastSeq: edge.edge.journal.lastSeq, syncedSeq: edge.edge.journal.syncedSeq }
+          : null
+        const localAgents = edge ? (edge.edge.views.agents().data.agents ?? []).length : 0
+
+        return {
+          edgeReady: Boolean(edge),
+          identity,
+          // `signing` is not the same as `identity.ready`: a node can hold a
+          // DID and still journal unsigned if the binary went missing after
+          // start-up.
+          signing: edge ? edge.signing : false,
+          localAgents,
+          journal,
+          pendingFacts: journal ? Math.max(0, journal.lastSeq - journal.syncedSeq) : 0,
+          publishing: community
+            ? { url: community.url, visibility: community.visibility, enabledAt: community.enabledAt ?? null }
+            : null,
+          claimInProgress: pendingClaim ? { userCode: pendingClaim.userCode, expiresAt: pendingClaim.expiresAt } : null,
+          // Read-only. These are security posture, not preferences, and the
+          // panel shows them so an operator can see what this node accepts —
+          // it does not offer to change them.
+          posture: {
+            acceptCommands: config.acceptCommands === true,
+            routeApprovals: config.routeApprovals === true,
+            authEnabled: state.token !== null,
+            boundHost: webServer.host,
+            port: webServer.port,
+          },
+        }
+      },
+
+      async claimStart() {
+        const edge = edgeHandle
+        if (!edge) return { ok: false, error: 'the edge is not running yet; try again in a moment' }
+        const identity = await getIdentity().catch(() => ({ did: undefined }))
+
+        const result = await communityFetch('/v1/claim/start', {
+          nodeId: edge.nodeId,
+          did: identity.did,
+          label: state.alias,
+        })
+        if (!result || !result.deviceCode) {
+          return { ok: false, error: 'the Community did not issue a code' }
+        }
+        pendingClaim = {
+          deviceCode: result.deviceCode,
+          userCode: result.userCode,
+          expiresAt: result.expiresAt,
+        }
+        return {
+          ok: true,
+          userCode: result.userCode,
+          verificationUrl: result.verificationUrl,
+          expiresAt: result.expiresAt,
+          intervalMs: result.intervalMs ?? 3000,
+        }
+      },
+
+      async claimPoll() {
+        if (!pendingClaim) return { ok: false, state: 'none' }
+
+        const result = await communityFetch('/v1/claim/poll', { deviceCode: pendingClaim.deviceCode })
+        if (result.state !== 'issued') {
+          if (result.state === 'expired' || result.state === 'unknown') pendingClaim = null
+          return { ok: true, state: result.state }
+        }
+
+        const base = await communityBaseUrl()
+        await saveCommunitySettings(ctx, join, workspace, {
+          url: base,
+          token: result.nodeToken,
+          visibility: 'structural',
+          nodeId: result.nodeId,
+          principalId: result.principalId ?? null,
+          enabledAt: new Date().toISOString(),
+          intervalMs: 60000,
+        })
+        pendingClaim = null
+
+        // Take effect now. Waiting for a restart after someone has just
+        // confirmed on another screen would read as a failure.
+        await restartEdge()
+        return { ok: true, state: 'issued', url: base }
+      },
+
+      async stopPublishing() {
+        await clearCommunitySettings(ctx, join, workspace)
+        pendingClaim = null
+        await restartEdge()
+        // Facts keep being journaled and keep queuing in the outbox; they are
+        // simply not sent. Going offline is not the same as going blind.
+        return { ok: true, publishing: null }
+      },
+
+      async setVisibility(visibility) {
+        const community = await resolveCommunity()
+        if (!community) return { ok: false, error: 'this node is not publishing' }
+        const next = visibility === 'full' ? 'full' : 'structural'
+        await saveCommunitySettings(ctx, join, workspace, { ...community, visibility: next })
+        await restartEdge()
+        return { ok: true, visibility: next }
+      },
+
+      async fetchIdentity() {
+        const bin = await resolveIflowId(true)
+        if (!bin) return { ok: false, error: iflowIdFailure ?? 'the binary could not be resolved' }
+        try {
+          identityCache = null
+          const identity = await getIdentity()
+          return { ok: true, path: bin, did: identity.did ?? null }
+        } catch (err) {
+          return { ok: false, path: bin, error: err && err.message ? err.message : String(err) }
+        }
+      },
+    })
 
     console.log(`iFlow A2A bridge ready (v${state.syncVersion}): /a2a on port ${webServer.port}, alias ${state.alias}, mirror on, update source ${sourcePath}, auth ${state.token === null ? 'off' : 'on'}`)
   },
