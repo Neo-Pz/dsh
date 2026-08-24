@@ -2639,6 +2639,7 @@ export default {
               ok: { type: 'boolean', required: true },
               path: { type: 'string' },
               did: { type: 'string' },
+              missing: { type: 'array', items: { type: 'string' } },
               error: { type: 'string' },
             },
           },
@@ -2646,7 +2647,14 @@ export default {
             {
               type: 'text',
               text: value.ok
-                ? `iFlow identity ready: ${value.did ?? 'no identity created yet'} (${value.path})`
+                ? `iFlow identity ready: ${value.did ?? 'no identity created yet'} (${value.path})` +
+                  ((value.missing ?? []).length > 0
+                    ? `
+
+But this binary cannot ${value.missing.join(' or ')}. ` +
+                      'It is the newest one available, so re-fetching will not help: the Release ' +
+                      'has not caught up with this plugin yet. Everything except the relay works.'
+                    : '')
                 : `iFlow identity unavailable: ${value.error}`,
             },
           ],
@@ -2665,7 +2673,18 @@ export default {
           try {
             identityCache = null
             const identity = await getIdentity()
-            return { ok: true, path: bin, ...(identity.did ? { did: identity.did } : {}) }
+            // Say what this binary cannot do, now, rather than letting the
+            // person discover it when a relay send fails. `resolveIflowId`
+            // already tried to fetch a newer one; if something is still
+            // missing, no amount of re-running this will produce it, and
+            // saying so is the difference between a fix and a loop.
+            const missing = missingCapabilities(iflowIdHelp ?? '')
+            return {
+              ok: true,
+              path: bin,
+              ...(identity.did ? { did: identity.did } : {}),
+              ...(missing.length > 0 ? { missing } : {}),
+            }
           } catch (err) {
             return {
               ok: false,

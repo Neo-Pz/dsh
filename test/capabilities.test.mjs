@@ -112,9 +112,16 @@ describe('what an operator is told', () => {
     assert.match(advice, /\/ws\/\.iflow\/bin\/iflow-id/)
   })
 
-  it('gives both ways out', () => {
+  it('gives both ways out that are the operator’s to take', () => {
     assert.match(advice, /iflow_fetch_identity/)
     assert.match(advice, /IFLOW_ID_PATH/)
+  })
+
+  it('admits the one cause they cannot fix from here', () => {
+    // Without this, someone whose Release is simply behind repeats
+    // "delete and re-fetch" forever and gets the same old binary each time.
+    assert.match(advice, /Release has not caught up/)
+    assert.match(advice, /nothing on this[\s\S]*machine fixes that/)
   })
 })
 

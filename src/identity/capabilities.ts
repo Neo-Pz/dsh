@@ -42,11 +42,22 @@ export function missingCapabilities(help) {
   return Object.keys(IFI_CAPABILITIES).filter((command) => !helpAdvertises(help, command))
 }
 
-/** What to tell someone whose binary is behind their plugin. */
+/**
+ * What to tell someone whose binary is behind their plugin.
+ *
+ * Three causes, and only two are the operator's to fix. Saying so matters: the
+ * advice used to be "delete it and re-fetch", which loops forever when the
+ * published Release is what is behind, and leaves someone repeating a step
+ * that cannot possibly work.
+ */
 export function staleBinaryAdvice(binPath, cachePath, missing) {
-  return (
-    `iFlow: the identity binary at ${binPath} is older than this plugin — it cannot ` +
-    `${missing.map((command) => IFI_CAPABILITIES[command]).join(' or ')}. Everything else works. ` +
-    `To fix it, delete ${cachePath} and run iflow_fetch_identity, or point IFLOW_ID_PATH at a current build.`
-  )
+  const cannot = missing.map((command) => IFI_CAPABILITIES[command]).join(' or ')
+  return [
+    `iFlow: the identity binary at ${binPath} is older than this plugin — it cannot ${cannot}.`,
+    'Everything else works. One of three things is true:',
+    `  · a stale cached copy — delete ${cachePath} and run iflow_fetch_identity`,
+    '  · a local build you would rather use — point IFLOW_ID_PATH at it',
+    '  · the published Release has not caught up with this plugin — nothing on this',
+    '    machine fixes that; a new binary has to be tagged and built first',
+  ].join('\n')
 }
