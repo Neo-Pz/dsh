@@ -42,4 +42,16 @@ export const api = {
   stop: () => call('/iflow/panel/publish/stop', { method: 'POST' }),
   setVisibility: (visibility) => call('/iflow/panel/visibility', { method: 'POST', body: { visibility } }),
   fetchIdentity: () => call('/iflow/panel/identity/fetch', { method: 'POST' }),
+  declarePrincipal: (label) => call('/iflow/panel/principal/declare', { method: 'POST', body: { label } }),
+  declareAgent: (input) => call('/iflow/panel/agents/declare', { method: 'POST', body: input }),
+
+  // Conversations: the inbox, and the two answers a person can give it.
+  conversations: () => call('/iflow/panel/conversations'),
+  acceptConversation: (conversationId) =>
+    call('/iflow/panel/conversations/accept', { method: 'POST', body: { conversationId } }),
+  rejectConversation: (conversationId, reason) =>
+    call('/iflow/panel/conversations/reject', { method: 'POST', body: { conversationId, reason } }),
+
+  network: () => call('/iflow/panel/network'),
+  probePeers: () => call('/iflow/panel/peers/probe', { method: 'POST' }),
 }

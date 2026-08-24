@@ -1,5 +1,5 @@
 /**
- * The publish gate.
+ * "Me" — who this machine is, and what leaves it.
  *
  * One decision lives on this page: should this machine's facts be public. The
  * layout follows the boundary the product is built on —
@@ -13,26 +13,17 @@
  * publish: it opens a list of exactly what would leave this machine, what is
  * redacted, and what never leaves at all. Someone should be able to decline
  * after reading it, and be no worse off.
+ *
+ * This is now a tab rather than the whole panel, so it takes `state` from the
+ * Hub instead of polling for itself — but it is still the tab the Hub lands on
+ * when nothing is waiting, because the gate has to stay findable.
  */
 
 import React from 'react'
 
 import { api } from './api.js'
-
-const POLL_IDLE_MS = 5000
-
-function Card({ title, tone, children, actions }) {
-  return (
-    <div className="ifp-card">
-      <div className="ifp-card-head">
-        {tone ? <span className={`ifp-dot ${tone}`} /> : null}
-        <h3>{title}</h3>
-      </div>
-      {children}
-      {actions ? <div className="ifp-actions">{actions}</div> : null}
-    </div>
-  )
-}
+import { DeclareSection } from './Declare.jsx'
+import { Card } from './ui.jsx'
 
 /**
  * What crossing the boundary actually means, itemised.
@@ -61,6 +52,10 @@ function Consent({ onCancel, onAccept, busy }) {
         <li>
           <span className="ifp-tag never">永不离开</span>
           <span>文件内容、工具参数、prompt、模型凭据与 API key、身份私钥</span>
+        </li>
+        <li>
+          <span className="ifp-tag never">永不离开</span>
+          <span>对话内容、对话与本地 Session 的绑定、工作目录路径</span>
         </li>
       </ul>
       <p className="ifp-muted">
@@ -102,27 +97,15 @@ function Claim({ claim, onCancel }) {
   )
 }
 
-export function IFlowPanel() {
-  const [state, setState] = React.useState(null)
+export function IFlowPanel({ state, onChanged }) {
   const [error, setError] = React.useState(null)
   const [stage, setStage] = React.useState('idle') // idle | consent | claiming
   const [claim, setClaim] = React.useState(null)
   const [busy, setBusy] = React.useState(false)
 
   const refresh = React.useCallback(async () => {
-    try {
-      setState(await api.state())
-      setError(null)
-    } catch (err) {
-      setError(err.message)
-    }
-  }, [])
-
-  React.useEffect(() => {
-    refresh()
-    const timer = setInterval(refresh, POLL_IDLE_MS)
-    return () => clearInterval(timer)
-  }, [refresh])
+    if (onChanged) await onChanged()
+  }, [onChanged])
 
   // While a claim is outstanding the edge is waiting on a human in another
   // window, so this polls faster and stops the moment it resolves.
@@ -181,28 +164,27 @@ export function IFlowPanel() {
     }
   }
 
-  if (!state) {
-    return (
-      <div className="ifp-root">
-        <div className="ifp-head">
-          <h2>iFlow · 弗流</h2>
-          <p>{error ?? '正在读取本机状态…'}</p>
-        </div>
-      </div>
-    )
-  }
-
   const publishing = state.publishing
   const identityReady = state.identity && state.identity.ready
 
   return (
-    <div className="ifp-root">
-      <div className="ifp-head">
-        <h2>iFlow · 弗流</h2>
-        <p>
-          这台机器是一个 Agent 网络节点。装上插件本身不发布任何东西——下面这个开关才是。
-        </p>
-      </div>
+    <>
+      <Card title="这个节点">
+        <div className="ifp-kv">
+          <div>
+            <b>{state.alias ?? '未命名'}</b>
+            <span className="ifp-muted">别名</span>
+          </div>
+          <div>
+            <b className="ifp-mono">{state.nodeId ?? '尚未就绪'}</b>
+            <span className="ifp-muted">节点 ID</span>
+          </div>
+          <div>
+            <b className="ifp-mono ifp-wrap">{state.workspaceRoot ?? '—'}</b>
+            <span className="ifp-muted">工作目录（永不离开本机）</span>
+          </div>
+        </div>
+      </Card>
 
       <Card title="本地发现" tone="on">
         <div className="ifp-row">
@@ -216,8 +198,26 @@ export function IFlowPanel() {
         </p>
       </Card>
 
+      <DeclareSection
+        principal={state.principal ?? null}
+        agents={state.declaredAgents ?? []}
+        busy={busy}
+        onDeclarePrincipal={(label) =>
+          act(async () => {
+            const result = await api.declarePrincipal(label)
+            if (!result.ok) throw new Error(result.error ?? '声明失败')
+          })
+        }
+        onDeclareAgent={(input) =>
+          act(async () => {
+            const result = await api.declareAgent(input)
+            if (!result.ok) throw new Error(result.error ?? '声明失败')
+          })
+        }
+      />
+
       <Card
-        title="身份"
+        title="节点密钥"
         tone={identityReady && state.signing ? 'on' : identityReady ? 'warn' : 'off'}
         actions={
           identityReady && state.signing ? null : (
@@ -232,8 +232,8 @@ export function IFlowPanel() {
             <p className="ifp-mono">{state.identity.did}</p>
             <p>
               {state.signing
-                ? '事实在产生时就由这个身份签名，离开本机后仍可被独立验证。'
-                : '身份存在，但当前无法签名——事实会被记录为未签名，无法在本机之外被证明。'}
+                ? '这台机器观察到的事实，在产生时就被签名，离开本机后仍可被独立验证。声明出来的 Agent 各自用自己的密钥签名。'
+                : '密钥存在，但当前无法签名——事实会被记录为未签名，无法在本机之外被证明。'}
             </p>
           </>
         ) : (
@@ -323,6 +323,18 @@ export function IFlowPanel() {
         </p>
         <div className="ifp-posture">
           <div>
+            <b>
+              {state.trust?.default === 'auto'
+                ? '自动接受任何对话'
+                : state.trust?.default === 'reject'
+                  ? '拒绝所有新对话'
+                  : '新对话需要你同意'}
+            </b>
+            <span className="ifp-muted">
+              trust.json · 已信任 {state.trust?.autoPeers ?? 0} · 已屏蔽 {state.trust?.blocked ?? 0}
+            </span>
+          </div>
+          <div>
             <b>{state.posture.acceptCommands ? '接受远程命令' : '不接受远程命令'}</b>
             <span className="ifp-muted">acceptCommands</span>
           </div>
@@ -346,6 +358,6 @@ export function IFlowPanel() {
       </Card>
 
       {error ? <div className="ifp-error">{error}</div> : null}
-    </div>
+    </>
   )
 }

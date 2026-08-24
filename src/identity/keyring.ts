@@ -90,15 +90,32 @@ export function agentDidsOf(declarations) {
 /**
  * Which key directory a signing request belongs to.
  *
- * Returns undefined when this node holds no key for that identity. The caller
- * must then REFUSE to sign — substituting another key would attribute the
- * event to an Agent whose operator never signed it, and a false attribution is
- * worse than an unsigned fact.
+ * The rule turns on ONE question: does the event name a DID?
+ *
+ * A DID on the event is a claim a verifier will check. If this node does not
+ * hold that key, it must REFUSE — signing with a different key would attribute
+ * the event to an identity whose operator never signed it, and a false
+ * attribution is worse than an unsigned fact.
+ *
+ * No DID on the event is not a claim about anyone. Every fact a runtime
+ * observes is issued by something — a session, a peer label, a bare `user` —
+ * that has no key and gets no DID (see `agentIssuer`). Refusing those would
+ * leave the node unable to sign its own observations, which is what P1 exists
+ * to do: the signature then means "this node observed this", which is exactly
+ * true. So an unnamed issuer falls back to the node's own key.
+ *
+ * Returns undefined only for the first case, and the caller refuses.
+ *
+ * @param nodeDid this node's own did:key, so its own facts resolve to its own
+ *                key rather than looking like somebody else's.
  */
-export function homeForSigning(join, workspace, declarations, context) {
-  if (!context) return undefined
+export function homeForSigning(join, workspace, declarations, context, nodeDid) {
+  if (!context) return nodeHome(join, workspace)
 
   if (context.did) {
+    // The node's own identity — the key that signs the AgentCard, and the one
+    // a verifier checks every unattributed fact against.
+    if (nodeDid && context.did === nodeDid) return nodeHome(join, workspace)
     if (declarations.principal && declarations.principal.did === context.did) {
       return principalHome(join, workspace)
     }
@@ -112,7 +129,8 @@ export function homeForSigning(join, workspace, declarations, context) {
     if (declared) return agentHome(join, workspace, declared.agentId)
   }
 
-  return undefined
+  // Named something, but nothing that carries a key or a claim.
+  return nodeHome(join, workspace)
 }
 
 /**

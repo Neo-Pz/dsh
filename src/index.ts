@@ -6,12 +6,15 @@ import { installIFlowEdge } from './edge/install.js'
 import { clearCommunitySettings, loadCommunitySettings, saveCommunitySettings } from './edge/community-config.js'
 import { installPanelRoutes } from './edge/panel.js'
 import { agentDidsOf, agentHome, homeForSigning, loadDeclarations, principalHome, saveDeclarations } from './identity/keyring.js'
+import { PinMismatchError, didFingerprint, looksLikeDid, reconcileDid } from './identity/pinning.js'
+import { helpAdvertises, missingCapabilities, staleBinaryAdvice } from './identity/capabilities.js'
+import { relayDecision } from './relay/envelope.js'
+import { createRelayTransport, startRelayPolling } from './relay/transport.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
 import {
   TERMINAL_TASK_STATES,
   blocksToText,
   errorInfo,
-  eventText,
   foldOutput,
   messageText,
   partsText,
@@ -20,14 +23,26 @@ import {
   taskText,
 } from './a2a/protocol.js'
 import { signingDigest, simpleHash } from './util/hash.js'
+import {
+  bindSession,
+  loadConversations,
+  loadTrust,
+  markSeen,
+  messageDigest,
+  newConversation,
+  saveConversations,
+  saveTrust,
+  trustDecision,
+} from './conversation/store.js'
 
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
 const sourcePath = fileURLToPath(import.meta.url)
 
 // iFlow — A2A bridge (Host half) — v18: P1 trust root.
 // Bidirectional Agent2Agent (A2A) bridge for DeepSeek Harness.
-// v12 adds a fixed 'iflow-mirror' session: inbound peer messages and local
-// replies are appended there so the GUI shows the two-way conversation live.
+// v21 retires the fixed 'iflow-mirror' session in favour of real Conversations:
+// an inbound message is bound to an ordinary DSH session by conversationId, and
+// a first contact waits for the operator to accept it before anything runs.
 // v18 (P1 / V18): integrates the Rust trust root (iflow-id): AgentCard JWS
 // (/.well-known/agent-card.signed.json), outbound request signing
 // (X-IFlow-Signature envelope), and inbound verification + replay check.
@@ -42,7 +57,6 @@ export default {
     const allowPeerUpdate = config.allowPeerUpdate === true
     // Writing into DSH's own session store is opt-in and, today, broken — see
     // `recordExchange`. The exchange is journaled either way.
-    const mirrorEnabled = config.mirror === true
 
     function makeAbortController() {
       const listeners = new Set()
@@ -81,9 +95,21 @@ export default {
       peers: new Map(),
       tasks: new Map(),
       outgoing: new Map(),
-      mirrorTurn: 0,
-      mirrorDetach: null,
-      mirrorPeer: null,
+      // Threads, by conversationId, and the local session each is bound to.
+      // Loaded from disk below; see src/conversation/store.ts for why this
+      // lives where it does.
+      conversations: {},
+      trust: { default: 'ask', peers: {}, blocked: [] },
+      // This node's own did:key, cached when the edge comes up so a
+      // conversation participant can carry it without an await.
+      identityDid: null,
+      // The Community this node publishes to, which is also its relay. Cached
+      // at edge start (and cleared when publishing stops) so the send path can
+      // ask without reading a file mid-request.
+      community: null,
+      // did:key of every Agent an operator declared here, so the relay can be
+      // told which Agents to route to this node.
+      declaredAgentDids: {},
     }
 
     // Scratch files handed to the iflow-id binary (Windows argv has a length
@@ -110,73 +136,6 @@ export default {
       }
     }
 
-    // ── mirror: a PLAIN session (no origin → UI visible) with the conversation
-    // UI's required event sequence. If a stale subagent-origin 'iflow-mirror'
-    // session from an earlier version still exists in the store, use a distinct
-    // id ('iflow-mirror-ui') so the visible plain session is the one written. ──
-    async function ensureMirror() {
-      try {
-        const existing = ctx.sessions.get('iflow-mirror')
-        let id = 'iflow-mirror'
-        if (existing) {
-          const meta = existing.header && existing.header.meta ? existing.header.meta : {}
-          if (!meta.origin || meta.origin !== 'subagent') return existing
-          id = 'iflow-mirror-ui'
-        }
-        // Re-adopt the persisted conversation so history survives a retire;
-        // fall back to a fresh live session. `enter` returns a detach disposer
-        // we call after each write batch to retire the session (so the UI can
-        // resume it instead of failing "while it is live").
-        const persistence = ctx.get('sessionPersistence')
-        const canReadopt = !!(persistence && typeof persistence.prepare === 'function')
-        let session
-        let detach
-        if (canReadopt) {
-          try {
-            const prep = await persistence.prepare(id)
-            session = prep.session
-            detach = ctx.sessions.enter(session)
-          } catch (err) {
-            // Not persisted yet (first message) → build fresh; it will be
-            // persisted on append, so retiring is safe (next write re-adopts).
-            let fresh = ctx.sessions.get(id)
-            if (!fresh) {
-              fresh = ctx.sessions.prepare(id, { meta: { cwd: workspace } })
-              detach = ctx.sessions.enter(fresh)
-            } else {
-              detach = undefined
-            }
-            session = fresh
-          }
-        } else {
-          // No persistence provider → keep the session live (old behavior) so it
-          // still accumulates; never retire (nothing to re-adopt from).
-          let fresh = ctx.sessions.get(id)
-          if (!fresh) {
-            fresh = ctx.sessions.prepare(id, { meta: { cwd: workspace } })
-            ctx.sessions.enter(fresh)
-          }
-          session = fresh
-          detach = undefined
-        }
-        try { ctx.sessionTitle.rename(session, 'iFlow · 双向镜像') } catch (e) { /* ignore */ }
-        if (detach) state.mirrorDetach = detach
-        else state.mirrorDetach = null
-        return session
-      } catch (err) {
-        console.error('iFlow ensureMirror failed', err)
-        return undefined
-      }
-    }
-
-    // Free the live slot after a write batch so the mirror session becomes
-    // resumable from the durable log instead of failing "while it is live".
-    function retireMirror() {
-      try {
-        if (state.mirrorDetach) { state.mirrorDetach(); state.mirrorDetach = null }
-      } catch (err) { console.error('iFlow retireMirror failed', err) }
-    }
-
     // ── offline mailbox: a persistent outbox/inbox queue so a message sent to
     // a peer that is currently unreachable is held and redelivered on a later
     // send attempt. Idempotent by (peer, prompt); deduped before enqueue. ──
@@ -200,11 +159,19 @@ export default {
         await ctx.fs.writeText(p, JSON.stringify(mb, null, 2))
       } catch (err) { console.error('iFlow saveMailbox failed', err) }
     }
-    async function enqueueOut(peer, prompt) {
+    async function enqueueOut(peer, prompt, thread = {}) {
       const mb = await loadMailbox()
-      if (mb.outbox.some(o => o.peer === peer && o.prompt === prompt && o.state !== 'delivered')) return
+      // Deduped by messageId when there is one. The old key was (peer, prompt),
+      // which conflated two genuinely different things: asking the same
+      // question twice on purpose, and one message queued twice by accident.
+      const duplicate = thread.messageId
+        ? mb.outbox.some((o) => o.messageId === thread.messageId)
+        : mb.outbox.some((o) => o.peer === peer && o.prompt === prompt && o.state !== 'delivered')
+      if (duplicate) return
       mb.outbox.push({
         id: uid('mbox'), peer, prompt, taskId: '',
+        conversationId: thread.conversationId ?? null,
+        messageId: thread.messageId ?? null,
         createdAt: Date.now(), attempts: 0, lastAttempt: 0, state: 'queued',
       })
       await saveMailbox(mb)
@@ -226,6 +193,11 @@ export default {
           map.set(item.name, {
             url: item.url,
             token: typeof item.token === 'string' && item.token.length > 0 ? item.token : null,
+            // The peer's did:key, pinned on first sight. This is what a message
+            // is sealed to, so it is the difference between end-to-end
+            // encryption and the appearance of it: whoever can change this
+            // value can read everything sent afterwards.
+            did: typeof item.did === 'string' && item.did.length > 0 ? item.did : null,
             addedAt: typeof item.addedAt === 'string' ? item.addedAt : iso(),
           })
         }
@@ -238,7 +210,7 @@ export default {
       try {
         const p = await ctx.fs.resolve(peersFile)
         const peers = [...state.peers.entries()].map(([name, entry]) => ({
-          name, url: entry.url, token: entry.token, addedAt: entry.addedAt,
+          name, url: entry.url, token: entry.token, did: entry.did ?? null, addedAt: entry.addedAt,
         }))
         await ctx.fs.writeText(p, JSON.stringify({ peers }, null, 2))
       } catch (err) { console.error('iFlow savePeers failed', err) }
@@ -261,65 +233,96 @@ export default {
       for (const [name, entry] of state.peers) probePeer(name, entry)
     }).catch(() => {})
 
-    // ── human-in-the-loop: a message typed directly into the mirror session
-    // (a user/message whose id is NOT plugin-minted 'iflow-…') is routed to the
-    // session-bound peer so the operator participates in the agent↔agent
-    // conversation. The distinct "human vs agent" visual badge is the client
-    // side (ui-conversation MessageItem); here we do the participation/routing.
-    async function sendToPeer(peerName, prompt) {
-      const entry = resolvePeer(peerName)
-      if (!entry) return { ok: false, error: 'unknown peer' }
-      const rpc = (method, params) => curlPost(`${entry.url}/a2a`, { jsonrpc: '2.0', id: uid('req'), method, params }, 60, entry.token)
-      return rpc('SendMessage', {
-        message: { messageId: uid('msg'), role: 'ROLE_USER', parts: [{ text: prompt, mediaType: 'text/plain' }] },
-        configuration: { returnImmediately: true, historyLength: 0 },
-        metadata: { from: state.alias, machine: await getMachineName() },
-      })
-    }
-    ctx.on('session/event', (session, event) => {
-      try {
-        if (!session || session.id !== 'iflow-mirror') return
-        if (!event || event.type !== 'user/message') return
-        const d = event.data
-        if (!d || typeof d.id !== 'string' || d.id.startsWith('iflow-')) return // plugin-written
-        const text = eventText(d)
-        if (!text || !state.mirrorPeer) return
-        sendToPeer(state.mirrorPeer, text).then(() => {}).catch(() => {})
-      } catch (err) { /* best-effort */ }
-    })
+    // ── conversations: the thread a message belongs to, and the local session
+    // it is bound to. Durable, like the peer registry, and for the same reason:
+    // a restart must not turn an accepted peer back into a stranger, nor lose
+    // which session a thread was already talking in. ──
+    const conversationsReady = Promise.all([
+      loadConversations(ctx, join, workspace).then((store) => { state.conversations = store.conversations }),
+      loadTrust(ctx, join, workspace).then((trust) => { state.trust = trust }),
+    ]).catch((err) => { console.error('iFlow: could not load conversation state', err) })
 
-    // side: 'self'   → this machine's own turn → user/message (renders RIGHT,
-    //                  WeChat "me").     'remote' → the peer's turn →
-    //                  assistant/message (renders LEFT, WeChat "other"). The DSH
-    //                  conversation UI aligns user/message right and
-    //                  assistant/message left (MessageItem.cs style), so swapping
-    //                  the roles relative to the A2A direction yields the WeChat
-    //                  bubble layout: remote on the left, self on the right.
+    async function persistConversations() {
+      try {
+        await saveConversations(ctx, join, workspace, { conversations: state.conversations })
+      } catch (err) {
+        console.error('iFlow saveConversations failed', err)
+      }
+    }
+
+    /** How many threads are waiting for a person here. The badge reads this. */
+    function pendingConversationCount() {
+      return Object.values(state.conversations).filter((c) => c.state === 'pending').length
+    }
+
+    /** This node's own agent id in the network, matching the edge descriptor. */
+    function selfAgentId() {
+      return edgeHandle ? edgeHandle.edge.descriptor.selfAgentId : `node-${state.alias}`
+    }
+
+    /**
+     * The thread this message belongs to, created on first sight.
+     *
+     * `conversationId` IS the A2A `contextId`. That field already exists on
+     * both Message and Task, so a peer that predates any of this simply omits
+     * it, gets one minted here, and never notices — no parallel header, no
+     * version negotiation, no break.
+     */
+    function resolveConversation(conversationId, { peer, peerDid, preview, state: initial } = {}) {
+      let conversation = state.conversations[conversationId]
+      if (!conversation) {
+        conversation = newConversation(conversationId, { peer, peerDid, preview, state: initial, now: iso() })
+        state.conversations[conversationId] = conversation
+      } else {
+        if (peer && !conversation.peer) conversation.peer = peer
+        if (peerDid && !conversation.peerDid) conversation.peerDid = peerDid
+        conversation.updatedAt = iso()
+      }
+      return conversation
+    }
+
+    /** The two ends of a thread, as the domain models participants. */
+    function participantsFor(conversation, initiator) {
+      const mine = { agentId: selfAgentId(), did: state.identityDid ?? undefined, role: 'recipient', joinedAt: iso() }
+      const theirs = {
+        agentId: conversation.peer ?? 'remote',
+        did: conversation.peerDid ?? undefined,
+        role: 'initiator',
+        joinedAt: iso(),
+      }
+      if (initiator === 'self') {
+        mine.role = 'initiator'
+        theirs.role = 'recipient'
+      }
+      return [mine, theirs]
+    }
+
     /**
      * Record one side of an agent-to-agent exchange.
      *
-     * Two destinations, and only one of them is ours:
+     * `side` is 'self' for this node's own turn and 'remote' for the peer's.
      *
-     * The JOURNAL is where this belongs. An A2A exchange is a fact about this
-     * node — who spoke, when, on which task — and the journal already carries
-     * the rest of that story under the same `taskId`: the grant it arrived
-     * with, the task it started, the tools it called, the approvals it waited
-     * on. Recorded here it is signed, replayable, and ours.
-     *
-     * The MIRROR is a DSH chat session the plugin writes into so the exchange
-     * shows up in the host's UI. It is off by default now, because it does not
-     * work and cannot be made to: the plugin passes `surfaceOp` on every
-     * append, DSH's persistence does not store it, and DSH's loader then
-     * rejects the file it wrote itself —
+     * THE MIRROR IS GONE. Until now this also wrote both sides into a single
+     * fixed `iflow-mirror` DSH session so the exchange showed up in the host
+     * UI. That was a second chat system, and it was the wrong shape twice
+     * over: one global session and one global peer, when conversations are
+     * many and point-to-point; and a round trip through DSH's private session
+     * format, which rejected the file the plugin had just written —
      *
      *   invalid seed event at index 3: session event "assistant/message"
      *   is surface-eligible and requires a surfaceOp marker
      *
-     * That is a round trip through someone else's private format, and keeping
-     * up with it means reverse-engineering it again on every DSH release. Set
-     * `config.mirror: true` to turn it back on and accept that.
+     * so it shipped disabled by default and stayed that way.
+     *
+     * A remote conversation now runs in a real DSH session, bound to its
+     * conversationId, which the operator already sees in the ordinary session
+     * list with the ordinary UI. There is nothing left for a mirror to show.
+     *
+     * What remains here are the two records, at two tiers: the local journal
+     * entry that keeps the text, and the network-shaped `conversation.message_*`
+     * fact that carries only a digest.
      */
-    async function recordExchange(side, text, label, peer) {
+    async function recordExchange(side, text, label, peer, thread = {}) {
       // The fact, first and unconditionally: it must not depend on a UI
       // integration being healthy.
       //
@@ -328,15 +331,24 @@ export default {
       // adapter defines. The domain's reducers ignore what they do not know, so
       // it lands in the journal and in Replay without disturbing any
       // projection, which is the right shape for a log of exchanges.
+      //
+      // TWO RECORDS, TWO TIERS. This one keeps the plaintext, because it is
+      // this machine's own record of what it saw, and `edge/sync.ts` redacts
+      // `text` before anything leaves. The network-shaped fact is the separate
+      // `conversation.message_*` event below, which carries only a digest and
+      // is therefore safe by construction rather than by redaction.
       if (edgeHandle) {
         try {
           await edgeHandle.edge.journal.record({
             type: 'a2a.message',
             subject: { kind: 'agent', id: peer || label },
+            conversationId: thread.conversationId,
             payload: {
               direction: side === 'self' ? 'outbound' : 'inbound',
               peer: peer || null,
               label,
+              conversationId: thread.conversationId ?? null,
+              messageId: thread.messageId ?? null,
               // Free text, and the most revealing this node holds. It stays
               // here: `text` is redacted before anything is published.
               text,
@@ -348,45 +360,21 @@ export default {
         }
       }
 
-      if (!mirrorEnabled) return
-      await mirrorAppend(side, text, label)
-    }
-
-    async function mirrorAppend(side, text, label) {
-      try {
-        const mirror = await ensureMirror()
-        if (!mirror) return
-        const turn = state.mirrorTurn + 1
-        const step = 1
-        mirror.append('turn/start', { turn })
-        mirror.append('step/start', { turn, step })
-        const content = [{ type: 'text', text: `${label} ${text}` }]
-        if (side === 'self') {
-          mirror.append('user/message', {
-            id: `iflow-${uid('m')}`,
-            role: 'user',
-            content,
-            source: { kind: 'user' },
-          }, { surfaceOp: 'append' })
-        } else {
-          mirror.append('assistant/message', {
-            turn,
-            step,
-            message: {
-              id: `iflow-${uid('m')}`,
-              role: 'assistant',
-              content,
-              source: { kind: 'model', provider: 'iflow', model: 'remote' },
-            },
-          }, { surfaceOp: 'append' })
+      if (thread.conversationId) {
+        const shared = {
+          conversationId: thread.conversationId,
+          messageId: thread.messageId ?? uid('msg'),
+          contentDigest: messageDigest(text),
+          actorType: thread.actorType ?? 'agent',
+          origin: thread.origin ?? (side === 'self' ? 'agent' : 'a2a'),
         }
-        mirror.append('step/end', { turn, step })
-        state.mirrorTurn = turn
-        // Free the live slot so the user can reopen the mirror conversation.
-        retireMirror()
-      } catch (err) {
-        console.error('iFlow mirrorAppend failed', err)
+        observeEdge('conversation.message', (observer) =>
+          side === 'self'
+            ? observer.conversationMessageSent({ ...shared, toAgentId: peer || 'remote' })
+            : observer.conversationMessageReceived({ ...shared, fromAgentId: peer || 'remote' }),
+        )
       }
+
     }
 
     async function curlRaw(method, url, payload, timeoutSec, token) {
@@ -439,6 +427,163 @@ export default {
       return curlRaw('GET', url, undefined, timeoutSec, token)
     }
 
+    // ── the relay: a way to reach a peer this machine cannot dial ──────────
+    //
+    // Two machines behind different NATs have no direct route. One leaves a
+    // sealed envelope with the Community; the other collects it. The relay
+    // carries the SAME signed request a direct POST would have carried, so
+    // the receiving end verifies it identically — see src/relay/envelope.ts.
+    const relay = createRelayTransport({
+      iflowId,
+      scratchPath,
+      async readBytes(path) { return readFileSync(path) },
+      async writeBytes(path, bytes) { writeFileSync(path, bytes) },
+      async post(url, payload, token) { return curlPost(url, payload, 30, token) },
+      async get(url, token) { return JSON.parse(await curlGet(url, 30, token)) },
+    })
+
+    /**
+     * The relay this node uses, or null.
+     *
+     * The Community and the relay are the same service and the same
+     * credential, so being connected to one is being connected to the other.
+     * A node that never published has no token and therefore no relay, which
+     * is the right default: it also has nothing on the network to be reached
+     * about.
+     */
+    function relaySettings() {
+      const community = state.community
+      if (!community || !community.url || !community.token) return null
+      if (config.relay === false) return null
+      return { url: community.url, token: community.token }
+    }
+
+    /**
+     * Send one message the long way round.
+     *
+     * The request built here is byte-for-byte the one a direct POST would
+     * have sent, signed the same way, and it is that whole thing — body plus
+     * signature envelope — that gets sealed. The recipient runs the ordinary
+     * verification on it. Nothing about arriving via the relay makes a message
+     * more trusted, or differently trusted.
+     */
+    async function sendViaRelay({ peer, toDid, prompt, conversationId, messageId }) {
+      const settings = relaySettings()
+      if (!settings) return { ok: false, error: 'no relay configured' }
+      // Said here rather than letting `iflow-id seal` fail with "unknown
+      // command" three frames down, where it reads like a bug rather than an
+      // upgrade someone has to do.
+      if (!iflowIdSupports('seal')) {
+        return {
+          ok: false,
+          error:
+            'this node\'s identity binary predates sealed envelopes, so nothing can be sent through the relay. ' +
+            `Delete ${join(IFI_BIN_DIR, IFI_BIN_NAME)} and run iflow_fetch_identity to get a current one.`,
+        }
+      }
+
+      const request = {
+        jsonrpc: '2.0',
+        id: uid('req'),
+        method: 'SendMessage',
+        params: {
+          message: {
+            messageId,
+            contextId: conversationId,
+            role: 'ROLE_USER',
+            parts: [{ text: prompt, mediaType: 'text/plain' }],
+          },
+          configuration: { returnImmediately: true, historyLength: 0 },
+          metadata: {
+            from: state.alias,
+            machine: await getMachineName(),
+            conversationId,
+            messageId,
+            actorType: 'human',
+            origin: 'keyboard',
+            principalId: state.identityDid ?? undefined,
+            // So the recipient can tell how this arrived. It changes nothing
+            // about verification; it is for the operator reading a thread.
+            via: 'relay',
+          },
+        },
+      }
+      const body = JSON.stringify(request)
+
+      // The same signature a direct POST would carry, over the same path, so
+      // the far side's digest check lines up without a special case.
+      let signature = null
+      try {
+        const id = await getIdentity()
+        if (id.did) {
+          const bodyPath = scratchPath('relay-sign.json')
+          await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
+          signature = JSON.parse(await iflowId(['sign-file', 'POST', '/a2a', bodyPath], 20))
+        }
+      } catch (err) {
+        // Signing is best-effort here exactly as it is on the direct path: an
+        // unsigned message is degraded, and it is the recipient's trust policy
+        // that decides what that is worth.
+      }
+
+      const sealed = await relay.seal({
+        toDid,
+        body,
+        signature,
+        conversationId,
+        messageId,
+        fromDid: state.identityDid,
+      })
+      const answer = await relay.send({
+        url: settings.url,
+        token: settings.token,
+        toDid,
+        sealed,
+        messageId,
+        conversationId,
+        fromDid: state.identityDid,
+      })
+      if (answer && answer.state === 'queued') return { ok: true }
+      return {
+        ok: false,
+        error:
+          answer && answer.state === 'unreachable'
+            ? `${peer} has never announced itself to the relay, so there is nowhere to leave this`
+            : `relay refused: ${JSON.stringify(answer)}`,
+      }
+    }
+
+    /**
+     * Hand a collected envelope to the ordinary inbound path.
+     *
+     * This is the join: after unsealing there is a body and a signature
+     * envelope, which is exactly what arriving over HTTP produces. The headers
+     * are synthesised so `verifyInbound` sees what it always sees, and
+     * `dispatch` is called unchanged.
+     *
+     * `replayWindow: false` is the one difference, and the only one — see the
+     * note on `verifyInbound`.
+     */
+    async function deliverFromRelay(opened, envelope) {
+      const headers = {}
+      if (opened.signature) headers['x-iflow-signature'] = JSON.stringify(opened.signature)
+      const verified = await verifyInbound({ headers }, opened.body, { replayWindow: false })
+      if (!verified.ok) {
+        throw new Error(`signature verification failed for ${envelope.id}: ${verified.error}`)
+      }
+      await dispatch(opened.body, verified.did, verified.grant)
+    }
+
+    /** Which Agents this node can be reached about. */
+    function relayRoster() {
+      const roster = []
+      if (state.identityDid) roster.push({ did: state.identityDid, label: state.alias, state: 'online' })
+      for (const [agentId, did] of Object.entries(state.declaredAgentDids ?? {})) {
+        if (did) roster.push({ did, label: agentId, state: 'online' })
+      }
+      return roster
+    }
+
     // ── P1 trust root bridge: spawn the Rust `iflow-id` binary. The dynamic
     // sandbox has no Web Crypto, so all identity/signing/verification work is
     // delegated to the reference implementation. The binary belongs to this
@@ -453,6 +598,9 @@ export default {
     // had not been cut yet, must not disable signing for the life of the
     // process. Retry, but not on every call.
     const IFI_RETRY_MS = 5 * 60 * 1000
+
+    /** The resolved binary's `help` output, or null before it was asked. */
+    let iflowIdHelp = null
     // Smaller than any real build of the identity binary. A GitHub error page
     // is a few KB, which is exactly what this catches.
     const IFI_MIN_BYTES = 200 * 1024
@@ -533,9 +681,12 @@ export default {
      * Best-effort and silent on failure: this is an optimisation for the NEXT
      * upgrade, and the binary that was just found still works either way.
      */
-    function adoptIflowIdBinary(from, to) {
+    function adoptIflowIdBinary(from, to, { force = false } = {}) {
       try {
-        if (statSync(to).size >= IFI_MIN_BYTES) return
+        // `force` is how a capable binary replaces a stale cached one. Without
+        // it the cache is write-once, which is exactly what leaves an old copy
+        // shadowing a newer build for the life of the install.
+        if (!force && statSync(to).size >= IFI_MIN_BYTES) return
       } catch { /* not there yet, copy it */ }
       try {
         mkdirSync(IFI_BIN_DIR, { recursive: true })
@@ -657,46 +808,113 @@ export default {
      * and the download is retried on a cooldown.
      */
     async function resolveIflowId(force = false) {
+      // `force` has to discard the cached answer, not just skip the download
+      // cooldown. Otherwise the early return below fires first and
+      // `iflow_fetch_identity` is a no-op on any node that already resolved
+      // something — including one that settled for a binary too old to seal,
+      // which is exactly the node whose operator is being told to run it.
+      if (force) {
+        iflowIdResolved = null
+        iflowIdHelp = null
+      }
       if (iflowIdResolved) return iflowIdResolved
 
       const cand = join(IFI_BIN_DIR, IFI_BIN_NAME)
+
+      // Every binary this machine can see, in preference order.
+      const present = []
       for (const candidate of IFI_SEARCH_PATHS) {
         try {
           const resolved = await ctx.subprocess.resolveExecutable(candidate)
-          if (resolved) {
-            iflowIdResolved = resolved
-            iflowIdFailure = null
-            // Found one inside the package (the install hook fetched it, or an
-            // operator copied it in). Keep a copy where upgrades cannot reach:
-            // otherwise the next update replaces the package directory and the
-            // same manual copy is needed all over again.
-            if (resolved !== cand) adoptIflowIdBinary(resolved, cand)
-            return iflowIdResolved
-          }
+          if (resolved && !present.includes(resolved)) present.push(resolved)
         } catch (e) { /* try the next location */ }
       }
 
-      const now = Date.now()
-      if (!force && iflowIdLastAttempt > 0 && now - iflowIdLastAttempt < IFI_RETRY_MS) {
-        return false
-      }
-      iflowIdLastAttempt = now
-
-      try {
-        if (await fetchIflowIdBinary()) {
-          const resolved = await ctx.subprocess.resolveExecutable(cand)
-          if (resolved) {
-            iflowIdResolved = resolved
-            return iflowIdResolved
-          }
-          iflowIdFailure = `downloaded to ${cand} but the host will not execute it`
+      // Prefer one that can do everything this plugin needs, rather than
+      // simply the first that exists. Otherwise a stale cached copy shadows a
+      // freshly built one sitting right there in the checkout.
+      for (const candidate of present) {
+        const help = await probeIflowIdCommands(candidate)
+        if (missingCapabilities(help).length === 0) {
+          iflowIdResolved = candidate
+          iflowIdHelp = help
+          iflowIdFailure = null
+          // Keep a copy where a plugin upgrade cannot reach, overwriting an
+          // older one: that cache is the whole reason a capable binary might
+          // otherwise be ignored.
+          if (candidate !== cand) adoptIflowIdBinary(candidate, cand, { force: true })
+          return iflowIdResolved
         }
-      } catch (e) {
-        iflowIdFailure = `auto-fetch threw: ${e && e.message ? e.message : String(e)}`
+      }
+
+      // Something is here but it predates a command this plugin needs. Try for
+      // a newer build before settling, on the same cooldown as a missing one.
+      const now = Date.now()
+      const mayFetch = force || iflowIdLastAttempt === 0 || now - iflowIdLastAttempt >= IFI_RETRY_MS
+      if (mayFetch) {
+        iflowIdLastAttempt = now
+        try {
+          if (await fetchIflowIdBinary()) {
+            const downloaded = await ctx.subprocess.resolveExecutable(cand)
+            if (downloaded) {
+              iflowIdResolved = downloaded
+              iflowIdHelp = await probeIflowIdCommands(downloaded)
+              iflowIdFailure = null
+              warnAboutMissingCapabilities(downloaded)
+              return iflowIdResolved
+            }
+            iflowIdFailure = `downloaded to ${cand} but the host will not execute it`
+          }
+        } catch (e) {
+          iflowIdFailure = `auto-fetch threw: ${e && e.message ? e.message : String(e)}`
+        }
+      }
+
+      // A binary that cannot seal can still sign, verify, meter and issue
+      // grants. Refusing to use it because the network is down would turn a
+      // node that mostly works into one that does not work at all.
+      if (present.length > 0) {
+        iflowIdResolved = present[0]
+        iflowIdHelp = await probeIflowIdCommands(present[0])
+        iflowIdFailure = null
+        warnAboutMissingCapabilities(present[0])
+        return iflowIdResolved
       }
 
       iflowIdResolved = false
       return iflowIdResolved
+    }
+
+    /**
+     * A binary's `help` output — printed by every version since the first, so
+     * this works against one older than the idea of asking it anything.
+     */
+    async function probeIflowIdCommands(bin) {
+      try {
+        const handle = ctx.subprocess.spawn({
+          argv: [bin, 'help'],
+          cwd: workspace,
+          stdio: { stdin: 'ignore', stdout: { maxBytes: 256 * 1024 }, stderr: { maxBytes: 16 * 1024 } },
+          graceMs: 5000,
+        })
+        await handle.done
+        return handle.collected.stdout ? handle.collected.stdout.readFrom(0).text : ''
+      } catch (err) {
+        // Unreadable help proves nothing, so it reads as "supports nothing" —
+        // the safe way to be wrong about whether a feature is available.
+        return ''
+      }
+    }
+
+    function warnAboutMissingCapabilities(bin) {
+      const missing = missingCapabilities(iflowIdHelp ?? '')
+      if (missing.length === 0) return
+      console.warn(staleBinaryAdvice(bin, join(IFI_BIN_DIR, IFI_BIN_NAME), missing))
+    }
+
+    /** Can the resolved binary do this? Answers false before one is resolved. */
+    function iflowIdSupports(command) {
+      return iflowIdHelp !== null && helpAdvertises(iflowIdHelp, command)
     }
 
     /**
@@ -912,7 +1130,7 @@ export default {
       }
     }
 
-    async function runChild(taskId, text, controller, from) {
+    async function runChild(taskId, text, controller, from, thread = {}) {
       const startedAt = Date.now()
       const selection = ctx.agentDefaultModel.currentSelection()
       const agentOptions = selection && selection.provider && selection.model
@@ -957,33 +1175,72 @@ export default {
         }
       }
       setStatus(taskId, 'TASK_STATE_WORKING', 'Processing the request with a local agent.')
-      await recordExchange('remote', text, `[agent:${from || 'remote'}]`, from)
-      const childId = `iflow-${uid('agent')}`
+      await recordExchange('remote', text, `[agent:${from || 'remote'}]`, from, thread)
+
+      // ── resolve the session this conversation talks in ─────────────────
+      //
+      // A Conversation is a durable thread; a Session is this runtime's
+      // private container for it. The binding between them is what makes the
+      // second message of a conversation land in a model that remembers the
+      // first — before this, every inbound message got a fresh throwaway
+      // session and the peer was talking to an amnesiac.
+      //
+      // The far side has its own session with its own id. Neither ever learns
+      // the other's; only the conversationId is shared.
+      const conversation = thread.conversationId ? state.conversations[thread.conversationId] : undefined
+      const bound = conversation && conversation.binding ? conversation.binding.localSessionId : undefined
+      const setup = async (agentCtx) => {
+        // Mount the resolved preset inside the creation window so the child's
+        // toolset is decided before it can run anything. Which preset that is
+        // was settled above, and an unconfined child never gets this far
+        // unless the operator explicitly allowed it. Resume takes the same
+        // path: a resumed session is no less remote than a fresh one.
+        if (presetId) await ctx.agentPresets.mount(agentCtx, presetId)
+      }
+      const meta = { cwd: workspace, origin: 'subagent', ...(presetId ? { agentPreset: presetId } : {}) }
+
       let handle
-      try {
-        handle = await agents.create({
-          sessionId: childId,
-          meta: { cwd: workspace, origin: 'subagent', ...(presetId ? { agentPreset: presetId } : {}) },
-          agentOptions,
-          signal: controller.signal,
-          // Mount the resolved preset inside the creation window so the child's
-          // toolset is decided before it can run anything. Which preset that is
-          // was settled above, and an unconfined child never gets this far
-          // unless the operator explicitly allowed it.
-          setup: async (agentCtx) => {
-            if (presetId) await ctx.agentPresets.mount(agentCtx, presetId)
-          },
-        })
-      } catch (err) {
-        if (controller.signal.aborted) setStatus(taskId, 'TASK_STATE_CANCELED', 'The task was canceled.')
-        else setStatus(taskId, 'TASK_STATE_FAILED', `Failed to start the local agent: ${String(err && err.message ? err.message : err)}`)
-        return
+      let resumed = false
+      if (bound && typeof agents.resume === 'function') {
+        try {
+          handle = await agents.resume({ resumeSessionId: bound, agentOptions, signal: controller.signal, setup })
+          resumed = true
+        } catch (err) {
+          // The persisted session is gone — someone deleted it, or a store was
+          // cleared. The Conversation outlives it: fall through and bind a new
+          // one silently. Losing the thread because a local container was
+          // tidied away would be the wrong lifetime for the wrong object.
+          console.log(
+            `iFlow: conversation ${thread.conversationId} lost its local session ${bound}; starting a new one`,
+          )
+        }
+      }
+      if (!handle) {
+        const childId = `iflow-${uid('agent')}`
+        try {
+          handle = await agents.create({ sessionId: childId, meta, agentOptions, signal: controller.signal, setup })
+        } catch (err) {
+          if (controller.signal.aborted) setStatus(taskId, 'TASK_STATE_CANCELED', 'The task was canceled.')
+          else setStatus(taskId, 'TASK_STATE_FAILED', `Failed to start the local agent: ${String(err && err.message ? err.message : err)}`)
+          return
+        }
+        if (conversation) {
+          bindSession(conversation, {
+            runtime: 'dsh',
+            workspaceId: workspace,
+            localSessionId: handle.agent.session.id ?? childId,
+            now: iso(),
+          })
+          void persistConversations()
+        }
       }
       const child = handle.agent
-      try {
-        ctx.sessionTitle.rename(child.session, `iFlow · ${from || 'remote'}`)
-      } catch (err) {
-        console.error('iFlow rename failed', err)
+      if (!resumed) {
+        try {
+          ctx.sessionTitle.rename(child.session, `iFlow · ${from || 'remote'}`)
+        } catch (err) {
+          console.error('iFlow rename failed', err)
+        }
       }
       const onAbort = () => { try { child.cancel({ kind: 'parent' }) } catch (e) { /* ignore */ } }
       controller.signal.addEventListener('abort', onAbort)
@@ -1030,7 +1287,13 @@ export default {
           }]
         }
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
-        await recordExchange('self', textOut, `[agent:${state.alias}]`, state.alias)
+        // The reply is this Agent speaking, on the same thread the request
+        // arrived on, addressed back to whoever asked.
+        await recordExchange('self', textOut, `[agent:${state.alias}]`, from, {
+          conversationId: thread.conversationId,
+          actorType: 'agent',
+          origin: 'agent',
+        })
       } else {
         setStatus(taskId, 'TASK_STATE_FAILED', 'The local agent produced no output.')
       }
@@ -1044,12 +1307,64 @@ export default {
       if (text.length === 0) throw rpcException(-32602, 'Invalid parameters', 'message.parts must contain at least one text or data part')
       const metadata = params && params.metadata && typeof params.metadata === 'object' ? params.metadata : {}
       const from = typeof metadata.from === 'string' && metadata.from.length > 0 ? metadata.from : undefined
-      if (from) state.mirrorPeer = from
+      await conversationsReady
       const taskId = `iflow-${uid('task')}`
-      const contextId = typeof message.contextId === 'string' && message.contextId.length > 0 ? message.contextId : taskId
+
+      // conversationId IS the A2A contextId.
+      //
+      // The field is already on Message and Task in the protocol, so a peer
+      // that knows nothing about conversations omits it, gets one minted here,
+      // and is not broken by any of this. `metadata.conversationId` is only a
+      // fallback for a caller that sets metadata but not contextId.
+      const conversationId =
+        (typeof message.contextId === 'string' && message.contextId.length > 0 && message.contextId) ||
+        (typeof metadata.conversationId === 'string' && metadata.conversationId.length > 0 && metadata.conversationId) ||
+        `conv-${uid('c')}`
+      const messageId =
+        (typeof message.messageId === 'string' && message.messageId.length > 0 && message.messageId) ||
+        (typeof metadata.messageId === 'string' && metadata.messageId.length > 0 && metadata.messageId) ||
+        uid('msg')
+      // Who produced the words. The network actor is always the Agent; this
+      // says whether a person typed them or the Agent spoke on its own.
+      const actorType = metadata.actorType === 'human' ? 'human' : 'agent'
+      const origin = typeof metadata.origin === 'string' ? metadata.origin : 'a2a'
+
+      const known = state.conversations[conversationId]
+      const conversation = resolveConversation(conversationId, {
+        peer: from,
+        peerDid: signerDid,
+        preview: text,
+      })
+      const firstSighting = !known
+      // Redelivery from a sender's outbox must not inject the same message
+      // twice. The signature envelope's nonce stops a replayed HTTP request;
+      // this stops a legitimately re-sent one from being run again.
+      const fresh = markSeen(conversation, messageId)
+      if (firstSighting) {
+        observeEdge('conversation.opened', (observer) =>
+          observer.conversationOpened({
+            conversationId,
+            initiatedBy: from || 'remote',
+            participants: participantsFor(conversation, 'remote'),
+          }),
+        )
+      }
+
+      // ── the acceptance gate ────────────────────────────────────────────
+      //
+      // This is a SECOND security layer, independent of the first. The
+      // restricted `remote-a2a` preset answers "what may this peer's task
+      // do once it runs". Nothing answered "does this peer get to make us
+      // run anything at all" — so an unknown Agent could open sessions,
+      // spend tokens and trigger tool approvals without anyone here ever
+      // agreeing to talk to it. Message ACCEPTANCE and tool AUTHORIZATION
+      // are different questions and both have to be asked.
+      //
+      // Default is `ask`. See src/conversation/store.ts for the policy.
+      const decision = trustDecision(state.trust, { peerLabel: from, signerDid, conversation })
       const task = {
         id: taskId,
-        contextId,
+        contextId: conversationId,
         status: { state: 'TASK_STATE_SUBMITTED', timestamp: iso() },
         artifacts: [],
         metadata: {
@@ -1057,6 +1372,8 @@ export default {
           machine: typeof metadata.machine === 'string' && metadata.machine.length > 0 ? metadata.machine : null,
           prompt: text.slice(0, 400),
           receivedAt: iso(),
+          conversationId,
+          messageId,
           ...(signerDid ? { signerDid } : {}),
           ...(grant ? {
             grantId: grant.grantId,
@@ -1078,15 +1395,163 @@ export default {
           grantRef: grant ? grant.grantId : undefined,
         }),
       )
+      const configuration = params && params.configuration ? params.configuration : {}
+      if (!fresh) {
+        // Already handled. Answer with the task as it stands rather than
+        // running the same request a second time.
+        setStatus(taskId, 'TASK_STATE_COMPLETED', 'This message was already delivered on this conversation.')
+        return { task: snapshot(taskId, true) }
+      }
+
+      if (decision === 'reject') {
+        conversation.state = 'rejected'
+        void persistConversations()
+        if (firstSighting || known?.state !== 'rejected') {
+          observeEdge('conversation.rejected', (observer) =>
+            observer.conversationRejected({
+              conversationId,
+              rejectedBy: selfAgentId(),
+              decidedBy: 'policy',
+            }),
+          )
+        }
+        // REJECTED is terminal, so the sender's poll loop ends immediately
+        // rather than waiting out its timeout on an answer that will not come.
+        setStatus(taskId, 'TASK_STATE_REJECTED', 'This node is not accepting conversations from that agent.')
+        return { task: snapshot(taskId, true) }
+      }
+
+      if (decision === 'ask') {
+        // Park it. No session, no model, no tools — nothing this peer sent
+        // causes work here until a person says so. What is kept is the message
+        // itself, so that accepting later delivers it rather than losing it.
+        conversation.state = 'pending'
+        conversation.pendingTask = { taskId, text, from: from ?? null, messageId, actorType, origin }
+        conversation.preview = text.slice(0, 200)
+        void persistConversations()
+        // AUTH_REQUIRED is deliberately NOT terminal: the sender's existing
+        // GetTask poll keeps waiting, and when someone here accepts, the task
+        // moves on to WORKING and then COMPLETED with no change on their side.
+        setStatus(
+          taskId,
+          'TASK_STATE_AUTH_REQUIRED',
+          'Waiting for the operator of this node to accept the conversation.',
+        )
+        console.log(
+          `iFlow: ${from || 'an unknown agent'} wants to start conversation ${conversationId}. ` +
+          `Run iflow_conversations to accept or reject it.`,
+        )
+        return { task: snapshot(taskId, true) }
+      }
+
+      if (conversation.state === 'pending') {
+        observeEdge('conversation.accepted', (observer) =>
+          observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy: 'policy' }),
+        )
+      }
+      if (firstSighting) {
+        observeEdge('relation.recorded', (observer) =>
+          observer.relationRecorded({
+            sourceAgentId: selfAgentId(),
+            targetAgentId: from || 'remote',
+            type: 'contacted',
+          }),
+        )
+      }
+      conversation.state = 'active'
+      void persistConversations()
+
       const controller = makeAbortController()
       state.outgoing.set(taskId, { controller, done: undefined })
-      const done = runChild(taskId, text, controller, from)
+      const done = runChild(taskId, text, controller, from, {
+        conversationId,
+        messageId,
+        actorType,
+        origin,
+      })
       state.outgoing.get(taskId).done = done
       done.catch((err) => console.error(`iFlow task ${taskId} unhandled run error`, err))
-      const configuration = params && params.configuration ? params.configuration : {}
       if (configuration.returnImmediately === true) return { task: snapshot(taskId, true) }
       await done.catch(() => {})
       return { task: snapshot(taskId, true) }
+    }
+
+    /**
+     * Let a parked conversation through.
+     *
+     * The message that was held is delivered now, on the task the sender is
+     * still polling: AUTH_REQUIRED → WORKING → COMPLETED, with nothing to
+     * change on their side. That is the whole reason the gate uses a
+     * non-terminal state instead of failing the request and asking them to
+     * try again.
+     */
+    async function acceptConversation(conversationId, { decidedBy = 'human' } = {}) {
+      await conversationsReady
+      const conversation = state.conversations[conversationId]
+      if (!conversation) return { ok: false, error: `unknown conversation: ${conversationId}` }
+      if (conversation.state !== 'pending') {
+        return { ok: false, error: `conversation ${conversationId} is ${conversation.state}, not pending` }
+      }
+      conversation.state = 'accepted'
+      const parked = conversation.pendingTask
+      conversation.pendingTask = null
+      await persistConversations()
+
+      observeEdge('conversation.accepted', (observer) =>
+        observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy }),
+      )
+      observeEdge('relation.recorded', (observer) =>
+        observer.relationRecorded({
+          sourceAgentId: selfAgentId(),
+          targetAgentId: conversation.peer || 'remote',
+          type: 'contacted',
+        }),
+      )
+
+      if (!parked) return { ok: true, conversationId, state: 'accepted', delivered: false }
+
+      // The sender may already have given up waiting; the task object may also
+      // be gone after a restart. Either way the conversation is now accepted,
+      // so their next message goes straight through.
+      const task = state.tasks.get(parked.taskId)
+      if (!task) return { ok: true, conversationId, state: 'accepted', delivered: false }
+
+      conversation.state = 'active'
+      await persistConversations()
+      const controller = makeAbortController()
+      state.outgoing.set(parked.taskId, { controller, done: undefined })
+      const done = runChild(parked.taskId, parked.text, controller, parked.from ?? undefined, {
+        conversationId,
+        messageId: parked.messageId,
+        actorType: parked.actorType,
+        origin: parked.origin,
+      })
+      state.outgoing.get(parked.taskId).done = done
+      done.catch((err) => console.error(`iFlow task ${parked.taskId} unhandled run error`, err))
+      return { ok: true, conversationId, state: 'active', delivered: true, taskId: parked.taskId }
+    }
+
+    async function rejectConversation(conversationId, reason) {
+      await conversationsReady
+      const conversation = state.conversations[conversationId]
+      if (!conversation) return { ok: false, error: `unknown conversation: ${conversationId}` }
+      conversation.state = 'rejected'
+      const parked = conversation.pendingTask
+      conversation.pendingTask = null
+      await persistConversations()
+      observeEdge('conversation.rejected', (observer) =>
+        observer.conversationRejected({
+          conversationId,
+          rejectedBy: selfAgentId(),
+          decidedBy: 'human',
+          reason,
+        }),
+      )
+      // Terminal, so whoever is polling stops now instead of timing out.
+      if (parked && state.tasks.has(parked.taskId)) {
+        setStatus(parked.taskId, 'TASK_STATE_REJECTED', reason || 'The operator declined this conversation.')
+      }
+      return { ok: true, conversationId, state: 'rejected' }
     }
 
     function handleGetTask(params) {
@@ -1206,7 +1671,22 @@ export default {
     // ── P2 delegation: when the caller also attached an X-IFlow-Grant
     // authorization (a signed delegation grant), verify it against the
     // signer did and the action scope/level, and surface the level. ──
-    async function verifyInbound(req, body) {
+    /**
+     * @param options.replayWindow  enforce the nonce's 300-second freshness
+     *   window. True for anything that arrived over HTTP, where a request
+     *   outside the window is a replay. FALSE for a message collected from the
+     *   relay, where it is simply old: store-and-forward exists so a message
+     *   can wait for a machine that was off for a week, and a five-minute
+     *   window would reject exactly the messages the relay is for.
+     *
+     *   Nothing else is relaxed — the Ed25519 signature and the body digest
+     *   are checked identically on both paths. What replaces the window is
+     *   duplicate suppression by message id, in two independent places: the
+     *   relay's `INSERT OR IGNORE`, and `markSeen` on the conversation. A
+     *   relay redelivering an envelope therefore cannot cause a second run,
+     *   which is the property the window was protecting.
+     */
+    async function verifyInbound(req, body, { replayWindow = true } = {}) {
       const header = req.headers['x-iflow-signature']
       if (!header || typeof header !== 'string' || header.length === 0) return { ok: true, did: null }
       let envelope
@@ -1221,7 +1701,7 @@ export default {
         if (typeof sig === 'string' && sig.length > 0 && sig !== signingDigest(body)) {
           return { ok: false, did: envelope.signer, error: 'body digest mismatch' }
         }
-        if (typeof envelope.nonce === 'string' && typeof envelope.timestamp === 'number') {
+        if (replayWindow && typeof envelope.nonce === 'string' && typeof envelope.timestamp === 'number') {
           await iflowId(['replay-check', envelope.nonce, String(envelope.timestamp)], 20)
         }
         // P2 delegation: optional grant header → full authorization check.
@@ -1371,6 +1851,7 @@ export default {
         tokenSet: { type: 'boolean', required: true },
         healthy: { type: 'boolean' },
         lastSeen: { type: 'integer' },
+        did: { oneOf: [{ type: 'string' }, { type: 'null' }] },
       },
     }
 
@@ -1384,7 +1865,7 @@ export default {
     const tools = [
       defineTool({
         name: 'iflow_status',
-        description: 'iFlow: show the local A2A endpoint (AgentCard and JSON-RPC URLs), auth state, registered peers, sync version, mirror session state, and active inbound tasks.',
+        description: 'iFlow: show the local A2A endpoint (AgentCard and JSON-RPC URLs), auth state, registered peers, sync version, conversations (and how many are waiting for you to accept), and active inbound tasks.',
         parameters: {},
         output: {
           schema: {
@@ -1403,7 +1884,8 @@ export default {
               agentCard: { type: 'string' },
               rpcEndpoint: { type: 'string' },
               updateEndpoint: { type: 'string' },
-              mirrorSession: { type: 'string' },
+              conversations: { type: 'integer' },
+              conversationsPending: { type: 'integer' },
               authEnabled: { type: 'boolean' },
               peers: { type: 'array', items: peerItem },
               activeTasks: { type: 'integer' },
@@ -1412,13 +1894,13 @@ export default {
           },
           render: (_args, value) => [{
             type: 'text',
-            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  mirror session: ${value.mirrorSession}\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}${renderWarnings(value.warnings)}`,
+            text: `iFlow local endpoint:\n  AgentCard: ${value.agentCard}\n  JSON-RPC: ${value.rpcEndpoint}\n  update source: ${value.updateEndpoint}\n  syncVersion: ${value.syncVersion}\n  conversations: ${value.conversations} (${value.conversationsPending} waiting for you)\n  alias: ${value.alias}\n  machine: ${value.machine}\n  auth: ${value.authEnabled ? 'enabled' : 'off'}\n  peers: ${value.peers.map((p) => `${p.name} → ${p.url}${p.healthy === undefined ? '' : p.healthy ? ' (online)' : ' (offline)'}`).join('; ') || 'none'}\n  active inbound tasks: ${value.activeTasks}${renderWarnings(value.warnings)}`,
           }],
         },
         async execute() {
           const base = state.publicUrl || `http://127.0.0.1:${webServer.port}`
-          let mirrorState = 'none'
-          try { mirrorState = ctx.sessions.get('iflow-mirror') ? 'created' : 'absent' } catch (e) { /* ignore */ }
+          await conversationsReady
+          const threads = Object.values(state.conversations)
           // Refresh each peer's reachability so the report is current, not stale.
           for (const [name, entry] of state.peers) await probePeer(name, entry)
 
@@ -1454,9 +1936,10 @@ export default {
             agentCard: `${base}/.well-known/agent-card.json`,
             rpcEndpoint: `${base}/a2a`,
             updateEndpoint: `${base}/iflow/version.json`,
-            mirrorSession: mirrorState,
+            conversations: threads.length,
+            conversationsPending: threads.filter((c) => c.state === 'pending').length,
             authEnabled: state.token !== null,
-            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen })),
+            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen, did: entry.did ?? null })),
             activeTasks: [...state.tasks.values()].filter((t) => !TERMINAL_TASK_STATES.has(t.status.state)).length,
           }
         },
@@ -1492,6 +1975,7 @@ export default {
           name: { type: 'string', required: true, description: 'Local alias for the peer.' },
           url: { type: 'string', required: true, description: 'Base URL of the remote DSH web server, e.g. http://192.168.1.20:3080.' },
           token: { type: 'string', description: 'Optional Bearer token the remote requires; defaults to the local shared token when unset.' },
+          did: { type: 'string', description: "The peer's did:key, if you have checked it out of band. Pins it now instead of trusting the first one seen on the wire." },
         },
         output: {
           schema: {
@@ -1502,18 +1986,32 @@ export default {
               name: { type: 'string', required: true },
               url: { type: 'string', required: true },
               tokenSet: { type: 'boolean', required: true },
+              did: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+              error: { type: 'string' },
             },
           },
-          render: (_args, value) => [{ type: 'text', text: `peer ${value.name} → ${value.url} (${value.tokenSet ? 'token set' : 'no token'})` }],
+          render: (_args, value) => [{
+            type: 'text',
+            text: value.ok
+              ? `peer ${value.name} → ${value.url} (${value.tokenSet ? 'token set' : 'no token'})` +
+                (value.did ? `
+  identity pinned: ${didFingerprint(value.did)}` : '')
+              : `iFlow: ${value.error}`,
+          }],
         },
         async execute(args) {
           await peersReady
           const name = args.name.trim()
           const url = args.url.trim().replace(/\/+$/, '')
-          state.peers.set(name, { url, token: typeof args.token === 'string' && args.token.length > 0 ? args.token : null, addedAt: iso() })
+          let did = null
+          if (typeof args.did === 'string' && args.did.length > 0) {
+            if (!looksLikeDid(args.did)) return { ok: false, name, url, tokenSet: false, error: `not a did:key: ${args.did}` }
+            did = args.did
+          }
+          state.peers.set(name, { url, token: typeof args.token === 'string' && args.token.length > 0 ? args.token : null, did, addedAt: iso() })
           await savePeers()
           probePeer(name, state.peers.get(name))
-          return { ok: true, name, url, tokenSet: state.peers.get(name).token !== null }
+          return { ok: true, name, url, tokenSet: state.peers.get(name).token !== null, did }
         },
       }),
 
@@ -1538,8 +2036,120 @@ export default {
         async execute() {
           return {
             ok: true,
-            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen })),
+            peers: [...state.peers.entries()].map(([name, entry]) => ({ name, url: entry.url, tokenSet: entry.token !== null, healthy: entry.healthy, lastSeen: entry.lastSeen, did: entry.did ?? null })),
           }
+        },
+      }),
+
+      defineTool({
+        name: 'iflow_conversations',
+        description:
+          'iFlow: see conversations with other agents and answer the ones waiting on you. ' +
+          'A first message from an unknown agent is held — no session, no model, no tools — until you accept it here. ' +
+          'Actions: list (default), accept, reject, trust (auto-accept a peer from now on), block.',
+        parameters: {
+          action: { type: 'string', description: "'list' | 'accept' | 'reject' | 'trust' | 'block'. Default 'list'." },
+          conversationId: { type: 'string', description: 'Which conversation to accept or reject.' },
+          peer: { type: 'string', description: 'Peer name or did:key, for trust and block.' },
+          reason: { type: 'string', description: 'Optional reason recorded with a rejection.' },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              conversations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    conversationId: { type: 'string' },
+                    peer: { type: 'string' },
+                    state: { type: 'string' },
+                    preview: { type: 'string' },
+                    boundSession: { type: 'string' },
+                    updatedAt: { type: 'string' },
+                  },
+                },
+              },
+              conversationId: { type: 'string' },
+              state: { type: 'string' },
+              delivered: { type: 'boolean' },
+              taskId: { type: 'string' },
+              trust: { type: 'string' },
+              error: { type: 'string' },
+            },
+          },
+          render: (args, value) => {
+            if (!value.ok) return [{ type: 'text', text: `iFlow: ${value.error}` }]
+            if (Array.isArray(value.conversations)) {
+              if (value.conversations.length === 0) return [{ type: 'text', text: 'no conversations yet' }]
+              const lines = value.conversations.map((c) => {
+                const waiting = c.state === 'pending' ? '  ← waiting for you' : ''
+                const quote = c.preview ? `\n    "${c.preview}"` : ''
+                return `- ${c.conversationId}  ${c.peer ?? 'unknown'}  [${c.state}]${waiting}${quote}`
+              })
+              const pending = value.conversations.filter((c) => c.state === 'pending').length
+              const hint = pending > 0
+                ? `\n\n${pending} waiting. Accept with: iflow_conversations action=accept conversationId=…`
+                : ''
+              return [{ type: 'text', text: lines.join('\n') + hint }]
+            }
+            if (value.trust) return [{ type: 'text', text: `iFlow: ${args.peer} is now ${value.trust}` }]
+            const tail = value.delivered ? ' — the held message is running now' : ''
+            return [{ type: 'text', text: `iFlow: conversation ${value.conversationId} is ${value.state}${tail}` }]
+          },
+        },
+        async execute(args) {
+          await conversationsReady
+          const action = args.action || 'list'
+
+          if (action === 'list') {
+            const conversations = Object.values(state.conversations)
+              .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+              .map((c) => ({
+                conversationId: c.conversationId,
+                peer: c.peer ?? undefined,
+                state: c.state,
+                preview: c.preview || undefined,
+                // Shown locally and only locally: this is the Runtime-private
+                // half of the mapping and it never goes on the wire.
+                boundSession: c.binding ? c.binding.localSessionId : undefined,
+                updatedAt: c.updatedAt,
+              }))
+            return { ok: true, conversations }
+          }
+
+          if (action === 'accept') {
+            if (!args.conversationId) return { ok: false, error: 'accept needs a conversationId' }
+            return await acceptConversation(args.conversationId, { decidedBy: 'human' })
+          }
+
+          if (action === 'reject') {
+            if (!args.conversationId) return { ok: false, error: 'reject needs a conversationId' }
+            return await rejectConversation(args.conversationId, args.reason)
+          }
+
+          if (action === 'trust' || action === 'block') {
+            if (!args.peer) return { ok: false, error: `${action} needs a peer name or did:key` }
+            if (action === 'trust') {
+              state.trust.peers[args.peer] = 'auto'
+              state.trust.blocked = state.trust.blocked.filter((d) => d !== args.peer)
+            } else {
+              delete state.trust.peers[args.peer]
+              if (!state.trust.blocked.includes(args.peer)) state.trust.blocked.push(args.peer)
+            }
+            try {
+              await saveTrust(ctx, join, workspace, state.trust)
+            } catch (err) {
+              return { ok: false, error: `could not save trust settings: ${String(err && err.message ? err.message : err)}` }
+            }
+            return { ok: true, trust: action === 'trust' ? 'auto-accepted' : 'blocked' }
+          }
+
+          return { ok: false, error: `unknown action: ${action}` }
         },
       }),
 
@@ -1586,23 +2196,42 @@ export default {
               interfaceUrl: { type: 'string' },
               protocolBinding: { type: 'string' },
               skills: { type: 'array', items: { type: 'string' } },
+              did: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+              didPinned: { type: 'string' },
               error: { type: 'string' },
             },
           },
           render: (_args, value) => [{
             type: 'text',
             text: value.ok
-              ? `AgentCard: ${value.name} v${value.version}\n  ${value.description}\n  interface: ${value.interfaceUrl} (${value.protocolBinding})\n  skills: ${value.skills.join(', ')}`
+              ? `AgentCard: ${value.name} v${value.version}\n  ${value.description}\n  interface: ${value.interfaceUrl} (${value.protocolBinding})\n  skills: ${value.skills.join(', ')}` +
+                (value.did
+                  ? `\n  identity: ${value.did}\n  fingerprint: ${didFingerprint(value.did)}` +
+                    (value.didPinned === 'recorded'
+                      ? '\n  pinned. Messages are sealed to this key from now on, and a peer presenting a different one is refused.'
+                      : '\n  matches the key already pinned for this peer.')
+                  : '\n  identity: none published — this peer cannot be sent sealed messages.')
               : `discovery failed: ${value.error}`,
           }],
         },
         async execute(args) {
+          await peersReady
           const entry = resolvePeer(args.peer)
           if (!entry) return { ok: false, error: `unknown peer or invalid URL: ${args.peer}` }
           try {
             const text = await curlGet(`${entry.url}/.well-known/agent-card.json`, 15, entry.token)
             const card = JSON.parse(text)
             const iface = card.supportedInterfaces && card.supportedInterfaces.length > 0 ? card.supportedInterfaces[0] : {}
+            // The DID used to be read off the card and dropped, which left
+            // nothing on this machine able to seal a message for this peer.
+            // This is the sighting TOFU is built on, so it is pinned here.
+            const presented = card.identity && typeof card.identity.did === 'string' ? card.identity.did : null
+            const registered = state.peers.get(args.peer)
+            const settled = reconcileDid(args.peer, registered ? registered.did : null, presented)
+            if (registered && settled.outcome === 'recorded') {
+              registered.did = settled.did
+              await savePeers()
+            }
             return {
               ok: true,
               name: typeof card.name === 'string' ? card.name : entry.url,
@@ -1611,8 +2240,13 @@ export default {
               interfaceUrl: typeof iface.url === 'string' ? iface.url : `${entry.url}/a2a`,
               protocolBinding: typeof iface.protocolBinding === 'string' ? iface.protocolBinding : 'JSONRPC',
               skills: Array.isArray(card.skills) ? card.skills.map((s) => (s && typeof s.name === 'string' ? s.name : '')).filter(Boolean) : [],
+              did: settled.did,
+              didPinned: settled.outcome,
             }
           } catch (err) {
+            // A changed key is not a network failure and must not read like
+            // one: it is reported with the whole explanation attached.
+            if (err instanceof PinMismatchError) return { ok: false, error: err.message }
             return { ok: false, error: `discovery failed: ${String(err && err.message ? err.message : err)}` }
           }
         },
@@ -1734,6 +2368,7 @@ export default {
           prompt: { type: 'string', required: true, description: 'The task description to send to the remote agent.' },
           waitForCompletion: { type: 'boolean', description: 'Wait for the remote task to finish and return its answer. Default true.' },
           maxWaitSeconds: { type: 'integer', description: 'Cap on how long to wait for completion. Default 600 (10 minutes), max 3600.' },
+          conversationId: { type: 'string', description: 'Continue an existing conversation with this peer. Omit to start a new one; use iflow_conversations to list them.' },
         },
         output: {
           schema: {
@@ -1743,6 +2378,7 @@ export default {
               ok: { type: 'boolean', required: true },
               peer: { type: 'string', required: true },
               taskId: { type: 'string' },
+              conversationId: { type: 'string' },
               state: { type: 'string' },
               text: { type: 'string' },
               error: { type: 'string' },
@@ -1758,9 +2394,57 @@ export default {
         async execute(args) {
           const entry = resolvePeer(args.peer)
           if (!entry) return { ok: false, peer: args.peer, error: `unknown peer or invalid URL: ${args.peer}` }
-          state.mirrorPeer = args.peer
           const base = entry.url
           const token = entry.token
+          await conversationsReady
+          // Continue a named thread, or start one. Either way the id travels as
+          // the A2A `contextId`, which is where a peer already looks for it.
+          const conversationId =
+            typeof args.conversationId === 'string' && args.conversationId.length > 0
+              ? args.conversationId
+              : `conv-${uid('c')}`
+          const startingIt = !state.conversations[conversationId]
+          const outbound = resolveConversation(conversationId, {
+            peer: args.peer,
+            preview: args.prompt,
+            // A thread this node opens is one it has agreed to by opening it.
+            state: 'accepted',
+          })
+          if (outbound.state === 'pending') outbound.state = 'accepted'
+          const messageId = uid('msg')
+          markSeen(outbound, messageId)
+          void persistConversations()
+          if (startingIt) {
+            observeEdge('conversation.opened', (observer) =>
+              observer.conversationOpened({
+                conversationId,
+                initiatedBy: selfAgentId(),
+                participants: participantsFor(outbound, 'self'),
+              }),
+            )
+            observeEdge('conversation.accepted', (observer) =>
+              observer.conversationAccepted({
+                conversationId,
+                acceptedBy: selfAgentId(),
+                decidedBy: 'policy',
+              }),
+            )
+            observeEdge('relation.recorded', (observer) =>
+              observer.relationRecorded({
+                sourceAgentId: selfAgentId(),
+                targetAgentId: args.peer,
+                type: 'contacted',
+              }),
+            )
+          }
+          // A human typed this into a tool call; the Agent is what carries it
+          // onto the network. Both facts are recorded, and they are different.
+          const threadMeta = {
+            conversationId,
+            messageId,
+            actorType: 'human',
+            origin: 'keyboard',
+          }
           const rpc = (method, params) => curlPost(`${base}/a2a`, { jsonrpc: '2.0', id: uid('req'), method, params }, 60, token)
           // Offline mailbox: before sending, redeliver any queued messages for
           // this peer. Best-effort; a still-unreachable peer leaves them queued.
@@ -1769,10 +2453,23 @@ export default {
             let dirty = false
             for (const item of mb.outbox) {
               if (item.peer !== args.peer || item.state !== 'queued') continue
+              // Redeliver on the thread it was queued on, and with the SAME
+              // messageId: the recipient suppresses a duplicate by that id, so
+              // a retry can never inject the message twice.
               const r = await rpc('SendMessage', {
-                message: { messageId: uid('msg'), role: 'ROLE_USER', parts: [{ text: item.prompt, mediaType: 'text/plain' }] },
+                message: {
+                  messageId: item.messageId ?? uid('msg'),
+                  ...(item.conversationId ? { contextId: item.conversationId } : {}),
+                  role: 'ROLE_USER',
+                  parts: [{ text: item.prompt, mediaType: 'text/plain' }],
+                },
                 configuration: { returnImmediately: true, historyLength: 0 },
-                metadata: { from: state.alias, machine: await getMachineName() },
+                metadata: {
+                  from: state.alias,
+                  machine: await getMachineName(),
+                  ...(item.conversationId ? { conversationId: item.conversationId } : {}),
+                  ...(item.messageId ? { messageId: item.messageId } : {}),
+                },
               })
               item.attempts += 1
               item.lastAttempt = Date.now()
@@ -1784,36 +2481,97 @@ export default {
           let response
           try {
             response = await rpc('SendMessage', {
-              message: { messageId: uid('msg'), role: 'ROLE_USER', parts: [{ text: args.prompt, mediaType: 'text/plain' }] },
+              // `contextId` is the conversation. A peer that understands it
+              // continues the same thread in the same local session; one that
+              // does not simply echoes it back on the Task, as A2A already
+              // requires.
+              message: {
+                messageId,
+                contextId: conversationId,
+                role: 'ROLE_USER',
+                parts: [{ text: args.prompt, mediaType: 'text/plain' }],
+              },
               configuration: { returnImmediately: true, historyLength: 0 },
-              metadata: { from: state.alias, machine: await getMachineName() },
+              metadata: {
+                from: state.alias,
+                machine: await getMachineName(),
+                // Additive: an older peer ignores keys it does not know, so
+                // none of this can break an existing bridge.
+                conversationId,
+                messageId,
+                actorType: 'human',
+                origin: 'keyboard',
+                principalId: state.identityDid ?? undefined,
+              },
             })
           } catch (err) {
-            // Peer unreachable → hold the message in the persistent outbox.
-            try { await enqueueOut(args.peer, args.prompt) } catch (e) { /* best-effort */ }
-            return { ok: false, peer: args.peer, taskId: '', state: 'QUEUED', error: `peer offline; queued for redelivery: ${String(err && err.message ? err.message : err)}` }
+            // Not reachable from here. That is the normal case for two
+            // machines behind different NATs, not an error — so before the
+            // message goes into the local outbox to wait for a route that may
+            // never appear, try the one that does not need one.
+            const directError = String(err && err.message ? err.message : err)
+            const registered = state.peers.get(args.peer)
+            const decision = relayDecision({
+              peer: registered,
+              directError,
+              relayConfigured: Boolean(relaySettings()),
+            })
+            if (decision.use) {
+              try {
+                const relayed = await sendViaRelay({
+                  peer: args.peer,
+                  toDid: registered.did,
+                  prompt: args.prompt,
+                  conversationId,
+                  messageId,
+                })
+                if (relayed.ok) {
+                  try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
+                  return {
+                    ok: true,
+                    peer: args.peer,
+                    taskId: '',
+                    conversationId,
+                    state: 'RELAYED',
+                    text: '',
+                    error: undefined,
+                  }
+                }
+                // Fall through to the outbox with the relay's reason, which is
+                // more useful than the direct one it replaced.
+                try { await enqueueOut(args.peer, args.prompt, { conversationId, messageId }) } catch (e) { /* best-effort */ }
+                return { ok: false, peer: args.peer, taskId: '', conversationId, state: 'QUEUED', error: `${decision.reason}, but the relay could not take it: ${relayed.error}` }
+              } catch (relayErr) {
+                try { await enqueueOut(args.peer, args.prompt, { conversationId, messageId }) } catch (e) { /* best-effort */ }
+                return { ok: false, peer: args.peer, taskId: '', conversationId, state: 'QUEUED', error: `relay failed: ${String(relayErr && relayErr.message ? relayErr.message : relayErr)}` }
+              }
+            }
+            // No relay available → hold the message in the persistent outbox.
+            try { await enqueueOut(args.peer, args.prompt, { conversationId, messageId }) } catch (e) { /* best-effort */ }
+            return { ok: false, peer: args.peer, taskId: '', conversationId, state: 'QUEUED', error: `peer offline; queued for redelivery. ${decision.reason}` }
           }
-          if (response.error) return { ok: false, peer: args.peer, error: `remote error ${response.error.code}: ${response.error.message}` }
+          if (response.error) return { ok: false, peer: args.peer, conversationId, error: `remote error ${response.error.code}: ${response.error.message}` }
           const result = response.result || {}
           const task = result.task
-          // Mirror the outbound prompt (self → right, WeChat "me") once accepted.
-          try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer) } catch (e) { /* best-effort */ }
+          try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
+          const inbound = { conversationId, actorType: 'agent', origin: 'a2a' }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
-            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
+            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
             return {
-              ok: text.length > 0, peer: args.peer, taskId: '', state: 'MESSAGE', text,
+              ok: text.length > 0, peer: args.peer, taskId: '', conversationId, state: 'MESSAGE', text,
               ...(text.length === 0 ? { error: 'remote returned an empty message' } : {}),
             }
           }
-          if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, state: task.status.state, text: '' }
+          if (args.waitForCompletion === false) return { ok: true, peer: args.peer, taskId: task.id, conversationId, state: task.status.state, text: '' }
           if (TERMINAL_TASK_STATES.has(task.status.state)) {
             const text = taskText(task)
-            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
+            if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
               taskId: task.id,
+              conversationId,
               state: task.status.state,
               text,
               ...(text.length === 0 ? { error: `task ended in ${task.status.state} with no output` } : {}),
@@ -1827,22 +2585,38 @@ export default {
             await sleep(2000)
             try {
               const poll = await rpc('GetTask', { id: task.id })
-              if (poll.error) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `GetTask error ${poll.error.code}: ${poll.error.message}` }
+              if (poll.error) return { ok: false, peer: args.peer, taskId: task.id, conversationId, state: stateName, error: `GetTask error ${poll.error.code}: ${poll.error.message}` }
               if (poll.result && poll.result.task) {
                 finalTask = poll.result.task
                 stateName = finalTask.status.state
               }
             } catch (err) {
-              return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `GetTask failed: ${String(err && err.message ? err.message : err)}` }
+              return { ok: false, peer: args.peer, taskId: task.id, conversationId, state: stateName, error: `GetTask failed: ${String(err && err.message ? err.message : err)}` }
             }
           }
-          if (!TERMINAL_TASK_STATES.has(stateName)) return { ok: false, peer: args.peer, taskId: task.id, state: stateName, error: `timed out waiting for task ${task.id}` }
+          if (!TERMINAL_TASK_STATES.has(stateName)) {
+            // Non-terminal at the deadline covers the case where the far side
+            // parked this as a pending contact and nobody has answered yet.
+            // The thread survives on both ends; only this wait gave up.
+            const waiting = stateName === 'TASK_STATE_AUTH_REQUIRED'
+            return {
+              ok: false,
+              peer: args.peer,
+              taskId: task.id,
+              conversationId,
+              state: stateName,
+              error: waiting
+                ? `${args.peer} has not accepted this conversation yet; it is waiting for a person there. The conversation stays open — retry on conversationId ${conversationId}.`
+                : `timed out waiting for task ${task.id}`,
+            }
+          }
           const text = taskText(finalTask)
-          if (text.length > 0) try { await recordExchange('remote', text, `[${args.peer}]`, args.peer) } catch (e) { /* best-effort */ }
+          if (text.length > 0) try { await recordExchange('remote', text, `[${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,
             taskId: task.id,
+            conversationId,
             state: stateName,
             text,
             ...(text.length === 0 ? { error: `task ended in ${stateName} with no output` } : {}),
@@ -2254,7 +3028,7 @@ export default {
     for (const tool of tools) ctx.tools.register(tool)
 
     // ── iFlow edge (Origin Journal + Local Projection + read API) ──────────
-    // Additive: it observes DSH and journals facts. The A2A bridge, mirror,
+    // Additive: it observes DSH and journals facts. The A2A bridge,
     // grants and metering above are untouched, and a failure to start the
     // edge degrades observability without taking the bridge down with it.
     // The edge starts asynchronously, so anything that wants to journal a fact
@@ -2314,11 +3088,16 @@ export default {
      */
     async function startEdge() {
       const identity = await getIdentity()
+      state.identityDid = identity.did ?? null
       const community = await resolveCommunity()
+      state.community = community ?? null
       // Who this node speaks for. An Agent exists because a person declared it;
       // a node that has declared nothing still runs, and still journals, under
       // its own key alone.
       const declarations = await loadDeclarations(ctx, join, workspace)
+      // Same read, kept for the relay roster: these are the Agents this node
+      // asks to have messages routed to it for.
+      state.declaredAgentDids = agentDidsOf(declarations)
       return installIFlowEdge(ctx, {
         workspace,
         alias: state.alias,
@@ -2334,7 +3113,7 @@ export default {
         // with. Read once per edge start: declaring an Agent restarts the edge,
         // so this cannot go stale behind the journal's back.
         agentDids: agentDidsOf(declarations),
-        resolveSigningHome: (context) => homeForSigning(join, workspace, declarations, context),
+        resolveSigningHome: (context) => homeForSigning(join, workspace, declarations, context, identity.did),
         writeScratch: async (name, bytes) => {
           const path = scratchPath(name)
           writeFileSync(path, Buffer.from(bytes))
@@ -2386,6 +3165,21 @@ export default {
     })()
     ctx.effect(() => () => { if (edgeHandle) edgeHandle.dispose() })
 
+    // Collect anything left for this node, and say it is here.
+    //
+    // Started unconditionally and does nothing until `relaySettings()` answers,
+    // so connecting to the Community later needs no restart. It reads
+    // `state.community` on every tick rather than closing over it for the same
+    // reason: publishing can be turned on and off from the panel.
+    const stopRelayPolling = startRelayPolling({
+      transport: relay,
+      settings: relaySettings,
+      agents: relayRoster,
+      deliver: deliverFromRelay,
+      intervalMs: Number(config.relayIntervalMs) || 15_000,
+    })
+    ctx.effect(() => stopRelayPolling)
+
     // ── The control panel ─────────────────────────────────────────────────
     // Everything below is the publish gate: what this node would send, whether
     // it is sending, and the two buttons that change that.
@@ -2424,6 +3218,38 @@ export default {
         }
       },
 
+      // The Requests inbox. Same two answers the `iflow_conversations` tool
+      // gives, so the panel and the tool cannot drift into disagreeing about
+      // what accepting means.
+      async listConversations() {
+        await conversationsReady
+        return {
+          ok: true,
+          conversations: Object.values(state.conversations)
+            .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+            .map((c) => ({
+              conversationId: c.conversationId,
+              peer: c.peer,
+              peerDid: c.peerDid,
+              state: c.state,
+              preview: c.preview,
+              boundSession: c.binding ? c.binding.localSessionId : null,
+              createdAt: c.createdAt,
+              updatedAt: c.updatedAt,
+            })),
+        }
+      },
+
+      async acceptConversation(conversationId) {
+        if (!conversationId) return { ok: false, error: 'conversationId is required' }
+        return await acceptConversation(conversationId, { decidedBy: 'human' })
+      },
+
+      async rejectConversation(conversationId, reason) {
+        if (!conversationId) return { ok: false, error: 'conversationId is required' }
+        return await rejectConversation(conversationId, reason)
+      },
+
       async declareAgent(input) {
         try {
           const { declared } = await declareAgent(ctx, join, workspace, (a, home) => iflowId(a, home, 30), {
@@ -2444,6 +3270,7 @@ export default {
       },
 
       async state() {
+        await conversationsReady
         const community = await resolveCommunity()
         const declarations = await loadDeclarations(ctx, join, workspace)
         const identity = await (async () => {
@@ -2486,6 +3313,39 @@ export default {
             capabilities: a.capabilities ?? [],
             grantRef: a.grantRef,
           })),
+          // Who this node is, for the Hub's "Me" tab. `workspaceRoot` is a path
+          // on this disk and is shown only to the person sitting at it: this
+          // payload is loopback-guarded, and the path is never in a projection.
+          alias: state.alias,
+          nodeId: edge ? edge.nodeId : null,
+          workspaceRoot: workspace,
+          // Cached reachability, deliberately NOT probed here. The Launcher
+          // polls this route every 15 seconds; probing on that path would turn
+          // the panel into a scheduled port-scan of every registered peer.
+          // `POST /iflow/panel/peers/probe` is the explicit way to refresh.
+          peers: [...state.peers.entries()].map(([name, entry]) => ({
+            name,
+            url: entry.url,
+            tokenSet: entry.token !== null,
+            healthy: entry.healthy ?? null,
+            lastSeen: entry.lastSeen ?? null,
+          })),
+          // The badge reads this. Because the Launcher already polls /state,
+          // showing "someone is waiting" costs no additional request.
+          conversationsPending: pendingConversationCount(),
+          // Whether this node can reach a peer it cannot dial, and if not, why.
+          // An identity binary older than the plugin is the likely answer, and
+          // it is not something an operator would otherwise find out until a
+          // message failed to send.
+          relay: {
+            configured: Boolean(relaySettings()),
+            canSeal: iflowIdSupports('seal'),
+          },
+          trust: {
+            default: state.trust.default,
+            autoPeers: Object.values(state.trust.peers).filter((m) => m === 'auto').length,
+            blocked: state.trust.blocked.length,
+          },
           // Read-only. These are security posture, not preferences, and the
           // panel shows them so an operator can see what this node accepts —
           // it does not offer to change them.
@@ -2496,6 +3356,43 @@ export default {
             boundHost: webServer.host,
             port: webServer.port,
           },
+        }
+      },
+
+      /**
+       * The relationship graph, and only the relationship graph.
+       *
+       * `views.network()` also carries task, goal and room nodes — the shape of
+       * work in progress. Those are filtered out HERE rather than in the
+       * browser, for two reasons: the Hub's star map is about who knows whom
+       * (§23), and whatever is not sent cannot leak from the page that
+       * receives it.
+       */
+      async networkMap() {
+        const edge = edgeHandle
+        if (!edge) return { ok: true, nodes: [], edges: [], selfAgentId: null }
+        const view = edge.edge.views.network().data
+        return {
+          ok: true,
+          selfAgentId: edge.edge.descriptor.selfAgentId,
+          nodes: view.nodes.filter((n) => n.kind === 'agent'),
+          // `rel:` is the prefix projectNetworkGraph gives edges derived from an
+          // AgentRelation. Every other edge is a projection of a Task or a Room.
+          edges: view.edges.filter((e) => e.id.startsWith('rel:')),
+        }
+      },
+
+      async probePeers() {
+        for (const [name, entry] of state.peers) await probePeer(name, entry)
+        return {
+          ok: true,
+          peers: [...state.peers.entries()].map(([name, entry]) => ({
+            name,
+            url: entry.url,
+            tokenSet: entry.token !== null,
+            healthy: entry.healthy ?? null,
+            lastSeen: entry.lastSeen ?? null,
+          })),
         }
       },
 
@@ -2584,6 +3481,6 @@ export default {
       },
     })
 
-    console.log(`iFlow A2A bridge ready (v${state.syncVersion}): /a2a on port ${webServer.port}, alias ${state.alias}, mirror on, update source ${sourcePath}, auth ${state.token === null ? 'off' : 'on'}`)
+    console.log(`iFlow A2A bridge ready (v${state.syncVersion}): /a2a on port ${webServer.port}, alias ${state.alias}, update source ${sourcePath}, auth ${state.token === null ? 'off' : 'on'}`)
   },
 };

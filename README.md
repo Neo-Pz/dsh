@@ -29,11 +29,29 @@ another.
   defined level instead of full trust.
 - **P4 token metering** — tokens and estimated cost are recorded per task (idempotent, deduped),
   with a per-model pricing map, so the economy layer can settle later.
-- **In-session mirror** — a live "iFlow · 双向镜像" conversation shows both sides (remote left, self
-  right), survives restart (retire/re-adopt), and lets the operator type into the agent-to-agent flow
-  (marked `[agent:…]` vs bare human input).
+- **Conversations, not sessions** — a thread between two agents is a `conversationId` (carried as the
+  A2A `contextId`), and each side binds it to a DSH session of its own. The peer's second message
+  reaches a model that remembers the first; deleting the local session does not end the conversation,
+  it just binds a new one. Neither side ever learns the other's session id, and iFlow stores no
+  transcript: `conversation.*` facts carry a content digest, never the text.
+- **First contact waits for a person** — a message from an unknown agent is held as a pending request:
+  no session, no model, no tools, no tokens. `iflow_conversations` lists what is waiting and accepts
+  or rejects it; `trust` promotes a peer to auto-accept. This is a *separate* layer from the
+  restricted `remote-a2a` preset — that governs what an accepted task may do, this governs whether a
+  stranger gets to make this machine do anything at all.
+- **Relay, for peers you cannot dial** — two machines behind different NATs have no direct route, so
+  one leaves a sealed envelope with the Community and the other collects it. What is sealed is the
+  *complete signed A2A request*, so the recipient runs the same verification it runs on a direct
+  connection — there is no relay-specific trust path, because there is no relay-specific message.
+  The relay stores an opaque blob it holds no key for, cannot re-address it (the ciphertext is bound
+  to its conversation, message id and recipient), and empties it on collection, keeping only the
+  delivery receipt.
+- **Pinned peer identities** — a peer's `did:key` is recorded the first time it is seen and every
+  later sighting must match; a peer that presents a different key is refused, loudly, rather than
+  believed. See *Key distribution* below for what that does and does not protect.
 - **Offline mailbox** — a persistent outbox/`inbox` (`peers.json` registry; `mailbox.json` queue):
-  messages to a peer that is offline are queued and redelivered when it returns.
+  messages to a peer that is offline and has no relay route are queued and redelivered, on the same
+  conversation and with the same message id, so a retry cannot be delivered twice.
 - **Runtime health** — peer reachability is probed on read; registrations are persisted so they
   survive restarts.
 - **Origin Journal + projections** — DSH session, turn, tool and approval lifecycles are journaled
@@ -84,6 +102,35 @@ dsh plugin --profile web add dsh-plugin-terminal
 > silently downgraded to the full local toolset. Set `config.inboundPreset` to name a different
 > restricted preset, or `config.allowUnrestrictedInbound: true` to accept the risk deliberately.
 
+## Key distribution, and its one weak moment
+
+Sealing a message needs the recipient's `did:key`. That makes "where did this DID come from" the
+whole of the encryption story: whoever can substitute it can read everything sent afterwards, and
+the ciphertext looks perfect the entire time.
+
+The rule is the one SSH uses for host keys, for the same reason — there is no authority to ask:
+
+- The first `did:key` seen for a peer is **pinned** in `peers.json`.
+- Every later sighting must match. A mismatch is **refused**, never silently adopted.
+
+**Be clear about what this does not do.** It does not make first contact safe. If the very first
+sighting is a lie — a relay serving its own DID instead of the peer's — the pin records the lie and
+everything after is consistent with it. What pinning buys is that the window is exactly one moment
+per peer, and that attacking later means breaking a pin, which is loud.
+
+Two ways to close that window, if a peer matters enough:
+
+```sh
+# 1. Learn the key over a direct connection, before ever using the relay.
+iflow_discover peer=if-lt-b
+
+# 2. Or check the did with a person and pass it in.
+iflow_add_peer name=if-lt-b url=… did=did:key:z6Mk…
+```
+
+`iflow_discover` prints a short fingerprint (`z6Mkeuov…RaKZWg3`) for exactly this: reading 48 base58
+characters down a phone line is how key verification stops happening.
+
 ## The protocol
 
 - **Transport**: JSON-RPC 2.0 over HTTP (`/a2a`), AgentCard at `/.well-known/agent-card.json`.
@@ -98,7 +145,16 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
 
 ## Architecture
 
-- `src/index.ts` — the DSH Host plugin (`iflow_send`, peers, mirror, mailbox, metering, A2A dispatch).
+- `src/index.ts` — the DSH Host plugin (`iflow_send`, peers, conversations, mailbox, metering, A2A
+  dispatch).
+- `src/conversation/store.ts` — the local half of a Conversation: the acceptance policy, and the
+  `conversationId → local session id` binding. Kept at `<workspace>/.iflow/`, deliberately outside
+  `.iflow/edge/`, so nothing that publishes can reach it.
+- `src/relay/` — reaching a peer with no route. `envelope.ts` is the pure part (what gets sealed,
+  and the additional data binding it to its conversation); `transport.ts` is the client and the poll
+  loop. Sealing itself is `iflow-id seal` / `open` in `rust/src/envelope.rs`.
+- `src/identity/pinning.ts` — trust on first use for a peer's `did:key`, and the refusal when it
+  changes.
 - `src/runtime/dsh-ports.ts` — DSH implementations of the iFlow `RuntimePorts` (storage, subprocess,
   HTTP, clock, logger, ids).
 - `src/runtime/dsh-instrumentation.ts` — the only place that maps DSH lifecycle events to iFlow
@@ -111,8 +167,10 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
   sandbox's hand-rolled SHA-256), extracted so they can be unit tested.
 - `rust/` — the `iflow-id` reference implementation (identity/store, signing, AgentCard, grants,
   pricing, usage), invoked via `ctx.subprocess`.
-- Runtime state lives under `<workspace>/.iflow/` (identity, nonces, peers, mailbox, usage, pricing)
-  and `<workspace>/.iflow/edge/` (origin journal, outbox, command ledger, checkpoint).
+- Runtime state lives under `<workspace>/.iflow/` (identity, nonces, peers, mailbox, conversations,
+  trust, usage, pricing) and `<workspace>/.iflow/edge/` (origin journal, outbox, command ledger,
+  checkpoint). The split is load-bearing: only `edge/` is ever read by anything that publishes, so
+  the session bindings and message excerpts one level up cannot leave the machine by construction.
 
 Those two `runtime/` files are the **entire** DSH coupling. Porting iFlow to another application
 means writing their equivalents against `iflow-adapter-sdk`'s ports and passing its conformance

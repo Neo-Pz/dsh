@@ -20,7 +20,7 @@
 import React from 'react'
 
 import { IFlowLauncher, IFlowOverlay } from './Launcher.jsx'
-import { IFlowPanel } from './Panel.jsx'
+import { IFlowHub } from './Hub.jsx'
 import { insertStyles } from './styles.js'
 
 /**
@@ -64,7 +64,7 @@ export function apply(ctx) {
     const open = useOpen(openState)
     return (
       <IFlowOverlay open={open} onClose={() => openState.set(false)}>
-        <IFlowPanel />
+        <IFlowHub />
       </IFlowOverlay>
     )
   }
@@ -87,7 +87,7 @@ export function apply(ctx) {
         // than freezing whatever was current at registration.
         label: () => 'iFlow · 弗流',
       },
-      IFlowPanel,
+      IFlowHub,
     ),
   )
 
@@ -99,4 +99,4 @@ export function apply(ctx) {
   }
 }
 
-export { IFlowPanel }
+export { IFlowHub }

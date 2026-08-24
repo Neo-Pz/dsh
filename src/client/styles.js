@@ -90,7 +90,7 @@ export const STYLES = `
   padding: 48px 24px; overflow-y: auto;
 }
 .ifp-sheet {
-  position: relative; width: 100%; max-width: 640px;
+  position: relative; width: 100%; max-width: 760px;
   background: var(--dsw-alias-bg-base, #fff);
   border: 1px solid var(--dsw-alias-border-l1, #e3e6ea);
   border-radius: 14px; padding: 24px 26px 20px;
@@ -104,6 +104,63 @@ export const STYLES = `
 }
 .ifp-close:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); }
 
+/* Declaring an identity. */
+.ifp-field { display: block; margin: 12px 0; }
+.ifp-field > span { display: block; font-size: 12px; color: var(--dsw-alias-label-secondary, #6b7280); margin-bottom: 6px; }
+.ifp-field input[type="text"], .ifp-field input:not([type]) {
+  width: 100%; padding: 8px 11px; font-size: 13px; font-family: inherit;
+  border: 1px solid var(--dsw-alias-border-l1, #e3e6ea); border-radius: 8px;
+  background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, inherit);
+}
+.ifp-field input:focus { outline: 2px solid #2f6df6; outline-offset: 1px; }
+.ifp-caps { display: flex; flex-direction: column; gap: 6px; }
+.ifp-cap { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.ifp-cap input { margin: 0; }
+
+/* The Hub's tab strip. */
+.ifp-tabs {
+  display: flex; gap: 2px; margin-bottom: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, #e3e6ea);
+}
+.ifp-tab {
+  position: relative; border: 0; background: transparent; cursor: pointer;
+  font-family: inherit; font-size: 13px; font-weight: 550; padding: 8px 12px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.ifp-tab:hover { color: var(--dsw-alias-label-primary, inherit); }
+.ifp-tab.on { color: #2f6df6; border-bottom-color: #2f6df6; }
+.ifp-badge {
+  display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 5px;
+  border-radius: 999px; background: #b3261e; color: #fff;
+  font-size: 11px; font-weight: 650; line-height: 16px; text-align: center;
+}
+
+/* Node identity, and other short key/value blocks. */
+.ifp-kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.ifp-kv div { font-size: 12px; min-width: 0; }
+.ifp-kv b { display: block; font-weight: 550; font-size: 13px; margin-bottom: 2px; }
+.ifp-wrap { overflow-wrap: anywhere; }
+
+/* The requests inbox. */
+.ifp-reqs li { align-items: flex-start; justify-content: space-between; gap: 14px; padding: 12px 0; }
+.ifp-req-main { min-width: 0; flex: 1; }
+.ifp-req-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.ifp-req-preview {
+  margin: 6px 0 4px; font-size: 13px; line-height: 1.55;
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.ifp-req-actions { display: flex; gap: 6px; flex: none; }
+.ifp-req-actions .ifp-btn { padding: 6px 12px; }
+.ifp-req.waiting { background: rgba(47,109,246,.04); border-radius: 8px; padding-left: 10px; padding-right: 10px; }
+
+/* The relationship map. */
+.ifp-map { width: 100%; max-width: 340px; height: auto; display: block; margin: 4px auto 10px; }
+.ifp-map-label { font-size: 9px; fill: var(--dsw-alias-label-secondary, #6b7280); font-family: inherit; }
+.ifp-map-label.self { fill: #2f6df6; font-weight: 600; }
+.ifp-legend { display: flex; gap: 14px; flex-wrap: wrap; list-style: none; margin: 0 0 8px; padding: 0; font-size: 12px; }
+.ifp-legend li { display: flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-secondary, #6b7280); }
+.ifp-legend-dash { width: 14px; height: 2px; border-radius: 2px; }
 `
 
 let injected = false

@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-const { agentDidsOf, agentHome, homeForSigning, principalHome } = await import(
+const { agentDidsOf, agentHome, homeForSigning, nodeHome, principalHome } = await import(
   pathToFileURL(join(import.meta.dirname, '..', 'src', 'identity', 'keyring.ts')).href
 )
 const { createIflowIdSigner } = await import(
@@ -45,11 +45,33 @@ describe('choosing a key', () => {
     )
   })
 
-  it('has no answer for an identity this node does not hold', () => {
-    // Undefined is the whole contract: the caller must refuse, not fall back.
+  it('has no answer for a DID this node does not hold', () => {
+    // Undefined is the whole contract for a NAMED identity: a DID on the event
+    // is a claim a verifier will check, so the caller must refuse rather than
+    // sign it with a different key.
     assert.equal(homeForSigning(join, WORKSPACE, declarations, { did: 'did:key:zSomeoneElse' }), undefined)
-    assert.equal(homeForSigning(join, WORKSPACE, declarations, { agentId: 'agent-session-42' }), undefined)
-    assert.equal(homeForSigning(join, WORKSPACE, declarations, {}), undefined)
+  })
+
+  it('signs its own facts with its own key', () => {
+    // The node's own DID is an identity it holds, and the one a verifier checks
+    // every unattributed fact against.
+    assert.equal(
+      homeForSigning(join, WORKSPACE, declarations, { did: 'did:key:zNode' }, 'did:key:zNode'),
+      nodeHome(join, WORKSPACE),
+    )
+  })
+
+  it('falls back to the node key when the issuer claims no DID', () => {
+    // A session, a bare `user`, a peer label: these get no DID (see
+    // `agentIssuer`), so a node-key signature attributes nothing to anyone. It
+    // says "this node observed this", which is exactly true — and refusing here
+    // is what would leave a runtime unable to sign its own observations.
+    assert.equal(
+      homeForSigning(join, WORKSPACE, declarations, { agentId: 'agent-session-42' }),
+      nodeHome(join, WORKSPACE),
+    )
+    assert.equal(homeForSigning(join, WORKSPACE, declarations, {}), nodeHome(join, WORKSPACE))
+    assert.equal(homeForSigning(join, WORKSPACE, declarations, undefined), nodeHome(join, WORKSPACE))
   })
 
   it('reports the declared agents by id, for the descriptor', () => {
