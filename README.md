@@ -52,6 +52,12 @@ another.
 - **Pinned peer identities** — a peer's `did:key` is recorded the first time it is seen and every
   later sighting must match; a peer that presents a different key is refused, loudly, rather than
   believed. See *Key distribution* below for what that does and does not protect.
+- **Delivery receipts** — a relayed send returns as soon as the envelope is queued, so
+  `iflow_conversations` reports what became of it afterwards: `queued` → `delivered` → `accepted` or
+  `rejected`, plus `expired`. The first two the relay can answer; the last two it cannot, because it
+  cannot read a message and so cannot know what anyone decided about one — those arrive with the
+  reply. A state never walks backwards, so a polled `delivered` landing after an `accepted` does not
+  reopen a settled message.
 - **Offline mailbox** — a persistent outbox/`inbox` (`peers.json` registry; `mailbox.json` queue):
   messages to a peer that is offline and has no relay route are queued and redelivered, on the same
   conversation and with the same message id, so a retry cannot be delivered twice.

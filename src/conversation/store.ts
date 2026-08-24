@@ -151,11 +151,29 @@ function normalize(id, value) {
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
     seenMessageIds: Array.isArray(value.seenMessageIds) ? value.seenMessageIds.slice(-SEEN_LIMIT) : [],
+    outbound: Array.isArray(value.outbound) ? value.outbound.slice(-OUTBOUND_LIMIT) : [],
   }
 }
 
 /** How many message ids a thread remembers for duplicate suppression. */
 const SEEN_LIMIT = 200
+
+/** How many sent-message receipts a thread keeps. */
+const OUTBOUND_LIMIT = 50
+
+/**
+ * What is known about a message this node sent through the relay.
+ *
+ * `queued` and `delivered` are the relay's to report: it knows whether the
+ * envelope was collected. `accepted` and `rejected` are not — the relay
+ * cannot read a message, so it cannot know whether a person on the far side
+ * agreed to it. Those two arrive with the answer, which is the only thing
+ * that carries the recipient's decision.
+ *
+ * `unknown` is honest rather than optimistic: a relay that has forgotten a
+ * message has not told us it arrived.
+ */
+export const OUTBOUND_STATES = Object.freeze(['queued', 'delivered', 'accepted', 'rejected', 'expired', 'unknown'])
 
 export function newConversation(id, { peer, peerDid, state, preview, now }) {
   const at = now ?? new Date().toISOString()
@@ -173,6 +191,7 @@ export function newConversation(id, { peer, peerDid, state, preview, now }) {
     createdAt: at,
     updatedAt: at,
     seenMessageIds: [],
+    outbound: [],
   }
 }
 
@@ -204,4 +223,55 @@ export function bindSession(conversation, { runtime, workspaceId, localSessionId
   conversation.binding = { runtime, workspaceId, localSessionId }
   conversation.updatedAt = now ?? new Date().toISOString()
   return conversation.binding
+}
+
+/** Note that a message went out, so its fate can be asked about later. */
+export function recordOutbound(conversation, { messageId, preview, now }) {
+  if (!messageId) return
+  const at = now ?? new Date().toISOString()
+  conversation.outbound = (conversation.outbound ?? []).filter((m) => m.messageId !== messageId)
+  conversation.outbound.push({
+    messageId,
+    state: 'queued',
+    sentAt: at,
+    updatedAt: at,
+    preview: (preview ?? '').slice(0, 120),
+  })
+  if (conversation.outbound.length > OUTBOUND_LIMIT) {
+    conversation.outbound.splice(0, conversation.outbound.length - OUTBOUND_LIMIT)
+  }
+}
+
+/**
+ * Move one sent message to a new state.
+ *
+ * Refuses to walk backwards. The relay is polled, and a status read that
+ * arrives out of order must not turn an accepted message back into a delivered
+ * one — `delivered` is what the relay knows, `accepted` is what the recipient
+ * said, and the second outranks the first however late it lands.
+ */
+const OUTBOUND_RANK = { unknown: 0, queued: 1, expired: 2, delivered: 2, rejected: 3, accepted: 3 }
+
+export function markOutbound(conversation, messageId, next, now) {
+  const entry = (conversation.outbound ?? []).find((m) => m.messageId === messageId)
+  if (!entry) return false
+  if (!OUTBOUND_STATES.includes(next)) return false
+  if ((OUTBOUND_RANK[next] ?? 0) < (OUTBOUND_RANK[entry.state] ?? 0)) return false
+  if (entry.state === next) return false
+  entry.state = next
+  entry.updatedAt = now ?? new Date().toISOString()
+  return true
+}
+
+/** Messages whose fate the relay might still be able to report. */
+export function pendingOutbound(conversations) {
+  const out = []
+  for (const conversation of Object.values(conversations)) {
+    for (const message of conversation.outbound ?? []) {
+      if (message.state === 'queued' || message.state === 'delivered') {
+        out.push({ conversationId: conversation.conversationId, messageId: message.messageId })
+      }
+    }
+  }
+  return out
 }

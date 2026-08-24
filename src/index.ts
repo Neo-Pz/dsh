@@ -26,6 +26,9 @@ import { signingDigest, simpleHash } from './util/hash.js'
 import {
   bindSession,
   loadConversations,
+  markOutbound,
+  pendingOutbound,
+  recordOutbound,
   loadTrust,
   markSeen,
   messageDigest,
@@ -253,6 +256,21 @@ export default {
     /** How many threads are waiting for a person here. The badge reads this. */
     function pendingConversationCount() {
       return Object.values(state.conversations).filter((c) => c.state === 'pending').length
+    }
+
+    /**
+     * One line on what became of the messages this node sent on a thread.
+     *
+     * Counted rather than listed: the useful question is whether anything is
+     * still in the air, and a thread with forty delivered messages should not
+     * print forty lines to answer it.
+     */
+    function summariseOutbound(conversation) {
+      const sent = conversation.outbound ?? []
+      if (sent.length === 0) return undefined
+      const counts = {}
+      for (const message of sent) counts[message.state] = (counts[message.state] ?? 0) + 1
+      return Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(', ')
     }
 
     /** This node's own agent id in the network, matching the edge descriptor. */
@@ -543,7 +561,14 @@ export default {
         conversationId,
         fromDid: state.identityDid,
       })
-      if (answer && answer.state === 'queued') return { ok: true }
+      if (answer && answer.state === 'queued') {
+        const conversation = state.conversations[conversationId]
+        if (conversation) {
+          recordOutbound(conversation, { messageId, preview: prompt, now: iso() })
+          void persistConversations()
+        }
+        return { ok: true }
+      }
       return {
         ok: false,
         error:
@@ -619,6 +644,18 @@ export default {
 
       const task = parsed && parsed.result ? parsed.result.task : undefined
       if (!task) throw new Error(`relayed answer for ${envelope.id} carries neither a task nor an error`)
+
+      // The relay could tell us the envelope was collected. Only the answer can
+      // say whether a person on the far side agreed to it, so that is settled
+      // here and nowhere else.
+      const conversation = conversationId ? state.conversations[conversationId] : undefined
+      if (conversation && parsed.id) {
+        const outcome = task.status?.state === 'TASK_STATE_REJECTED' ? 'rejected' : 'accepted'
+        for (const sent of conversation.outbound ?? []) {
+          if (sent.state === 'queued' || sent.state === 'delivered') markOutbound(conversation, sent.messageId, outcome, iso())
+        }
+        void persistConversations()
+      }
 
       const text = taskText(task)
       if (text.length === 0) {
@@ -2203,6 +2240,7 @@ ${text}`)
                     state: { type: 'string' },
                     preview: { type: 'string' },
                     boundSession: { type: 'string' },
+                    sent: { type: 'string' },
                     updatedAt: { type: 'string' },
                   },
                 },
@@ -2222,7 +2260,8 @@ ${text}`)
               const lines = value.conversations.map((c) => {
                 const waiting = c.state === 'pending' ? '  ← waiting for you' : ''
                 const quote = c.preview ? `\n    "${c.preview}"` : ''
-                return `- ${c.conversationId}  ${c.peer ?? 'unknown'}  [${c.state}]${waiting}${quote}`
+                const sent = c.sent ? `\n    sent: ${c.sent}` : ''
+                return `- ${c.conversationId}  ${c.peer ?? 'unknown'}  [${c.state}]${waiting}${quote}${sent}`
               })
               const pending = value.conversations.filter((c) => c.state === 'pending').length
               const hint = pending > 0
@@ -2250,6 +2289,9 @@ ${text}`)
                 // Shown locally and only locally: this is the Runtime-private
                 // half of the mapping and it never goes on the wire.
                 boundSession: c.binding ? c.binding.localSessionId : undefined,
+                // What became of what this node sent. Without it a relayed send
+                // answers "RELAYED" and there is no way to ask again.
+                sent: summariseOutbound(c),
                 updatedAt: c.updatedAt,
               }))
             return { ok: true, conversations }
@@ -3328,6 +3370,15 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       settings: relaySettings,
       agents: relayRoster,
       deliver: deliverFromRelay,
+      pending: () => pendingOutbound(state.conversations),
+      onStatus: (conversationId, messageId, reported) => {
+        const conversation = state.conversations[conversationId]
+        if (!conversation) return
+        // `unknown` from the relay means it no longer holds the message. That
+        // is not delivery — a swept envelope and a collected one look the same
+        // from here — so it is recorded as what it is rather than guessed at.
+        if (markOutbound(conversation, messageId, reported, iso())) void persistConversations()
+      },
       intervalMs: Number(config.relayIntervalMs) || 15_000,
     })
     ctx.effect(() => stopRelayPolling)

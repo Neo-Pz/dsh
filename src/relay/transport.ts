@@ -79,6 +79,12 @@ export function createRelayTransport(io) {
     return post(`${url}/v1/relay/ack`, { messageIds }, token)
   }
 
+  async function status({ url, token, messageIds }) {
+    if (messageIds.length === 0) return {}
+    const answer = await post(`${url}/v1/relay/status`, { messageIds }, token)
+    return answer?.status ?? {}
+  }
+
   async function heartbeat({ url, token, agents }) {
     return post(`${url}/v1/relay/presence`, { agents }, token)
   }
@@ -136,7 +142,7 @@ export function createRelayTransport(io) {
     return { collected: envelopes.length, delivered, refused }
   }
 
-  return { seal, open, send, inbox, ack, heartbeat, directory, drain }
+  return { seal, open, send, inbox, ack, status, heartbeat, directory, drain }
 }
 
 /**
@@ -145,7 +151,17 @@ export function createRelayTransport(io) {
  * Same shape as `startCommunitySync`: one flight at a time, an interval that
  * does not hold the process open, and a disposer.
  */
-export function startRelayPolling({ transport, settings, agents, deliver, intervalMs = 15_000, logger = console }) {
+export function startRelayPolling({
+  transport,
+  settings,
+  agents,
+  deliver,
+  /** Sent messages whose fate is still open, and how to record an answer. */
+  pending = () => [],
+  onStatus = () => {},
+  intervalMs = 15_000,
+  logger = console,
+}) {
   let running = false
 
   const tick = async () => {
@@ -168,6 +184,19 @@ export function startRelayPolling({ transport, settings, agents, deliver, interv
             `iFlow relay: another node has claimed ${did}. Messages addressed to that Agent are being ` +
               'delivered elsewhere. If that is not a machine you control, treat the identity as compromised.',
           )
+        }
+      }
+
+      // Ask what became of what we sent. The relay can answer `delivered` and
+      // `expired`; it cannot answer `accepted`, because it cannot read the
+      // message and so cannot know what anyone decided about it. That arrives
+      // with the reply.
+      const open = pending()
+      if (open.length > 0) {
+        const reported = await transport.status({ url, token, messageIds: open.map((m) => m.messageId) })
+        for (const { conversationId, messageId } of open) {
+          const reportedState = reported[messageId]
+          if (reportedState) onStatus(conversationId, messageId, reportedState)
         }
       }
 

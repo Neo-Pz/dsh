@@ -17,8 +17,11 @@ const {
   conversationsPath,
   loadConversations,
   loadTrust,
+  markOutbound,
   markSeen,
   messageDigest,
+  pendingOutbound,
+  recordOutbound,
   newConversation,
   trustDecision,
   trustPath,
@@ -181,5 +184,86 @@ describe('the preview', () => {
   it('is bounded, because it is still somebody else’s text', () => {
     const conversation = newConversation('conv-1', { peer: 'p', preview: 'x'.repeat(5000) })
     assert.equal(conversation.preview.length, 200)
+  })
+})
+
+describe('what became of a message this node sent', () => {
+  const sent = (id = 'msg-1') => {
+    const conversation = newConversation('conv-1', { peer: 'if-lt-b' })
+    recordOutbound(conversation, { messageId: id, preview: 'analyse this' })
+    return conversation
+  }
+
+  it('starts queued', () => {
+    assert.equal(sent().outbound[0].state, 'queued')
+  })
+
+  it('moves forward as the relay and then the peer report', () => {
+    const c = sent()
+    assert.equal(markOutbound(c, 'msg-1', 'delivered'), true)
+    assert.equal(markOutbound(c, 'msg-1', 'accepted'), true)
+    assert.equal(c.outbound[0].state, 'accepted')
+  })
+
+  it('never walks backwards', () => {
+    // The relay is polled, so a `delivered` read can land after the answer
+    // already said `accepted`. Accepting that would turn a settled message
+    // back into an open one every poll.
+    const c = sent()
+    markOutbound(c, 'msg-1', 'accepted')
+    assert.equal(markOutbound(c, 'msg-1', 'delivered'), false)
+    assert.equal(markOutbound(c, 'msg-1', 'queued'), false)
+    assert.equal(markOutbound(c, 'msg-1', 'unknown'), false)
+    assert.equal(c.outbound[0].state, 'accepted')
+  })
+
+  it('treats rejected as just as final as accepted', () => {
+    const c = sent()
+    markOutbound(c, 'msg-1', 'rejected')
+    assert.equal(markOutbound(c, 'msg-1', 'delivered'), false)
+    assert.equal(c.outbound[0].state, 'rejected')
+  })
+
+  it('refuses a state that is not one of the six', () => {
+    const c = sent()
+    assert.equal(markOutbound(c, 'msg-1', 'probably-fine'), false)
+    assert.equal(c.outbound[0].state, 'queued')
+  })
+
+  it('ignores a message it never sent', () => {
+    assert.equal(markOutbound(sent(), 'msg-other', 'delivered'), false)
+  })
+
+  it('re-sending the same id replaces rather than duplicates', () => {
+    const c = sent()
+    recordOutbound(c, { messageId: 'msg-1', preview: 'again' })
+    assert.equal(c.outbound.length, 1)
+    assert.equal(c.outbound[0].state, 'queued')
+  })
+
+  it('only asks the relay about messages still in the air', () => {
+    const c = sent('a')
+    recordOutbound(c, { messageId: 'b' })
+    recordOutbound(c, { messageId: 'c' })
+    markOutbound(c, 'b', 'delivered')
+    markOutbound(c, 'c', 'accepted')
+    const open = pendingOutbound({ 'conv-1': c }).map((m) => m.messageId).sort()
+    assert.deepEqual(open, ['a', 'b'], 'a settled message must not be polled forever')
+  })
+
+  it('does not grow without bound', () => {
+    const c = newConversation('conv-1', { peer: 'p' })
+    for (let i = 0; i < 200; i++) recordOutbound(c, { messageId: `m-${i}` })
+    assert.ok(c.outbound.length <= 50)
+  })
+
+  it('survives a reload', async () => {
+    const c = sent()
+    markOutbound(c, 'msg-1', 'delivered')
+    const ctx = fakeFs({
+      [conversationsPath(join, WORKSPACE)]: JSON.stringify({ conversations: { 'conv-1': c } }),
+    })
+    const loaded = await loadConversations(ctx, join, WORKSPACE)
+    assert.equal(loaded.conversations['conv-1'].outbound[0].state, 'delivered')
   })
 })
