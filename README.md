@@ -77,8 +77,15 @@ dsh plugin --profile web add github:Neo-Pz/dsh && dsh web
 ```
 
 The `iflow-id` binary (the Rust trust root) is built by GitHub Actions on every `v*` tag and attached
-to the [Release](https://github.com/Neo-Pz/dsh/releases/latest) — for Windows/macOS/Linux. A fresh
-install auto-fetches the one matching your OS, so **no local Rust build is needed**.
+to the [Release](https://github.com/Neo-Pz/dsh/releases/latest) — for Windows, macOS and Linux, x86-64
+and arm64. The node fetches the one matching your OS **and architecture** the first time it needs it,
+so no local Rust build is needed and nothing has to run at install time.
+
+That last part is deliberate. There is no `prepare` hook: pnpm >= 10 keys build-script approval by the
+resolved commit, so a git-installed plugin would need a fresh `allowBuilds` entry in
+`pnpm-workspace.yaml` on *every* upgrade — and the hook would silently not run until someone added it.
+Fetching lazily at runtime needs no approval, retries on a cooldown, honours `HTTPS_PROXY`, and checks
+that what it got can actually do what this plugin needs.
 
 To also mount the [terminal panel](https://github.com/siberiah2o/dsh-plugin-terminal):
 

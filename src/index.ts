@@ -652,6 +652,15 @@ export default {
     // install), fetch it from the GitHub Release. Best-effort; local installs
     // that already have the binary never reach this. Errors fall through to the
     // existing "binary not found" path.
+    //
+    // THIS IS THE ONLY FETCH. There used to be a `prepare` hook that did the
+    // same thing at install time, and it was deleted for three independent
+    // reasons: pnpm >= 10 keys build-script approval by the resolved commit, so
+    // every upgrade from a git ref needed a fresh `allowBuilds` entry and the
+    // hook mostly never ran; its own comment admitted as much; and it chose the
+    // asset by platform alone, so Apple Silicon and ARM Linux were handed
+    // x86-64 binaries — the exact bug the arch-aware map above exists to avoid.
+    // A second, staler copy of this logic was worse than none.
     /**
      * curl arguments for reaching the Release from this machine.
      *
