@@ -198,6 +198,7 @@ describe('a message through the relay', { skip: !hasBinary }, () => {
   let bob
   let mallory
   let bobDid
+  let aliceDid
   let relay
 
   const REQUEST = JSON.stringify({
@@ -217,6 +218,7 @@ describe('a message through the relay', { skip: !hasBinary }, () => {
       assert.equal(created.status, 0, `create ${label}: ${created.stderr}`)
     }
     bobDid = JSON.parse(spawnSync(IFLOW_ID, ['--home', bob, 'show', '--json'], { encoding: 'utf8' }).stdout).did
+    aliceDid = JSON.parse(spawnSync(IFLOW_ID, ['--home', alice, 'show', '--json'], { encoding: 'utf8' }).stdout).did
     relay = fakeRelay()
     relay.routes.set(bobDid, 'node-b')
   })
@@ -330,6 +332,46 @@ describe('a message through the relay', { skip: !hasBinary }, () => {
     // Both are gone from the inbox: the good one delivered, the bad one
     // discarded rather than retried forever.
     assert.ok(relay.envelopes.get('msg-corrupt').delivered_at)
+  })
+
+  it('carries an answer back the way it came', async () => {
+    // The whole point of a two-way relay: a request with no connection to
+    // answer on still gets answered. Sealed to the original sender, matching
+    // the JSON-RPC id it was asked with.
+    relay.envelopes.clear()
+    relay.routes.set(aliceDid, 'node-a')
+
+    const bobSide = transportFor(bob, relay)
+    const answer = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      result: { task: { id: 't1', status: { state: 'TASK_STATE_COMPLETED' }, artifacts: [{ parts: [{ text: 'here is the analysis' }] }] } },
+    })
+    const sealedAnswer = await bobSide.seal({
+      toDid: aliceDid,
+      body: answer,
+      signature: null,
+      conversationId: 'conv-1',
+      messageId: 'msg-answer',
+      fromDid: bobDid,
+    })
+    // Route it to Alice's node so her inbox, not Bob's, is the one holding it.
+    relay.envelopes.set('msg-answer', {
+      id: 'msg-answer',
+      to_node_id: 'node-a',
+      to_did: aliceDid,
+      from_did: bobDid,
+      conversation_id: 'conv-1',
+      sealed: sealedAnswer,
+      delivered_at: null,
+    })
+
+    // Alice can open it, and what comes out is a response rather than a request.
+    const opened = await transportFor(alice, relay).open(relay.envelopes.get('msg-answer'))
+    const parsed = JSON.parse(opened.body)
+    assert.equal(parsed.method, undefined, 'an answer must not look like a request')
+    assert.equal(parsed.id, 'req-1', 'the answer must carry the id it was asked with')
+    assert.match(parsed.result.task.artifacts[0].parts[0].text, /here is the analysis/)
   })
 
   it('is delivered once even if the relay hands it over twice', async () => {

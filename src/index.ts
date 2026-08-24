@@ -571,7 +571,117 @@ export default {
       if (!verified.ok) {
         throw new Error(`signature verification failed for ${envelope.id}: ${verified.error}`)
       }
-      await dispatch(opened.body, verified.did, verified.grant)
+
+      // Two kinds of thing arrive on this channel. A REQUEST has a `method`
+      // and is dispatched exactly as an HTTP one would be. A RESPONSE is the
+      // answer to something this node sent, and must not be dispatched — a
+      // relay where every message provokes a message is a loop.
+      let parsed
+      try {
+        parsed = JSON.parse(opened.body)
+      } catch (err) {
+        throw new Error(`relayed payload for ${envelope.id} is not JSON-RPC`)
+      }
+
+      if (parsed && typeof parsed.method === 'string') {
+        await dispatch(opened.body, verified.did, verified.grant, {
+          via: 'relay',
+          // The answer goes back to whoever signed the request, not to whoever
+          // the relay says handed it over.
+          replyToDid: verified.did ?? envelope.from_did ?? null,
+        })
+        return
+      }
+
+      await acceptRelayedAnswer(parsed, envelope)
+    }
+
+    /**
+     * An answer to something this node sent over the relay.
+     *
+     * Recorded on its conversation so the exchange is complete on both sides —
+     * the local journal, the digest fact, and a line an operator can read. The
+     * `iflow_send` that started it has already returned (a relayed send cannot
+     * block for hours on a peer that has to be woken up and a human who has to
+     * accept), so this is where the answer surfaces.
+     */
+    async function acceptRelayedAnswer(parsed, envelope) {
+      const conversationId = envelope.conversation_id
+      const peer = conversationId ? state.conversations[conversationId]?.peer : undefined
+
+      if (parsed && parsed.error) {
+        console.error(
+          `iFlow relay: ${peer ?? envelope.from_did ?? 'a peer'} answered with an error on ` +
+            `${conversationId ?? 'an unknown conversation'}: ${parsed.error.code} ${parsed.error.message}`,
+        )
+        return
+      }
+
+      const task = parsed && parsed.result ? parsed.result.task : undefined
+      if (!task) throw new Error(`relayed answer for ${envelope.id} carries neither a task nor an error`)
+
+      const text = taskText(task)
+      if (text.length === 0) {
+        console.log(
+          `iFlow relay: ${peer ?? 'peer'} finished ${conversationId ?? ''} in ${task.status?.state} with no output`,
+        )
+        return
+      }
+
+      await recordExchange('remote', text, `[agent:${peer ?? envelope.from_did ?? 'remote'}]`, peer, {
+        conversationId,
+        messageId: envelope.id,
+        actorType: 'agent',
+        origin: 'a2a',
+      })
+      console.log(`iFlow relay: answer on ${conversationId ?? 'a conversation'} from ${peer ?? 'a peer'}:
+${text}`)
+    }
+
+    /**
+     * Send a finished task back to whoever asked for it over the relay.
+     *
+     * A direct request is answered on the connection it arrived on. A relayed
+     * one has no connection, so the answer is sealed and posted back the same
+     * way — as an ordinary JSON-RPC response carrying the same `id`, so the
+     * far side can match it to what it sent.
+     *
+     * Best-effort and never throws: the work is done and journaled either way,
+     * and a failure to deliver the answer must not undo it.
+     */
+    async function replyOverRelay(taskId) {
+      const task = state.tasks.get(taskId)
+      if (!task || !task.replyTo) return
+      const settings = relaySettings()
+      if (!settings) return
+      if (!iflowIdSupports('seal')) return
+
+      try {
+        const body = JSON.stringify(rpcResult(task.replyTo.requestId, { task: snapshot(taskId, true) }))
+        const messageId = uid('msg')
+        const sealed = await relay.seal({
+          toDid: task.replyTo.did,
+          body,
+          signature: null,
+          conversationId: task.replyTo.conversationId,
+          messageId,
+          fromDid: state.identityDid,
+        })
+        const answer = await relay.send({
+          url: settings.url,
+          token: settings.token,
+          toDid: task.replyTo.did,
+          sealed,
+          messageId,
+          conversationId: task.replyTo.conversationId,
+          fromDid: state.identityDid,
+        })
+        if (!answer || answer.state !== 'queued') {
+          console.error(`iFlow relay: could not return the answer for ${taskId}: ${JSON.stringify(answer)}`)
+        }
+      } catch (err) {
+        console.error(`iFlow relay: could not return the answer for ${taskId}`, err && err.message ? err.message : err)
+      }
     }
 
     /** Which Agents this node can be reached about. */
@@ -1076,9 +1186,19 @@ export default {
     function setStatus(taskId, stateName, text) {
       const task = state.tasks.get(taskId)
       if (!task) return
+      const wasTerminal = TERMINAL_TASK_STATES.has(task.status.state)
       task.status = { state: stateName, timestamp: iso() }
       if (text !== undefined) {
         task.status.message = { messageId: uid('msg'), role: 'ROLE_AGENT', parts: [{ text, mediaType: 'text/plain' }] }
+      }
+      // A request that arrived over the relay has no open connection to answer
+      // on, so the answer has to be sent back the same way it came. Hooked here
+      // rather than at each call site because a task reaches a terminal state
+      // from several — completed by the agent, failed, cancelled, or rejected
+      // by a person hours later — and a reply that only some of them send is
+      // worse than none.
+      if (task.replyTo && !wasTerminal && TERMINAL_TASK_STATES.has(stateName)) {
+        void replyOverRelay(taskId)
       }
     }
 
@@ -1309,7 +1429,7 @@ export default {
       try { await recordTaskUsage(taskId, from, child.session.events, startedAt, (selection && selection.model) || undefined) } catch (e) { /* best-effort */ }
     }
 
-    async function handleSendMessage(params, signerDid, grant) {
+    async function handleSendMessage(params, signerDid, grant, arrival) {
       const message = params && params.message ? params.message : undefined
       if (!message) throw rpcException(-32602, 'Invalid parameters', 'SendMessageRequest.message is required')
       const text = messageText(message)
@@ -1394,6 +1514,10 @@ export default {
             grantRevocationGrace: grant.revocationGrace || 60,
           } : {}),
         },
+      }
+      // Where to send the answer, when there is no connection to answer on.
+      if (arrival && arrival.via === 'relay' && arrival.replyToDid) {
+        task.replyTo = { did: arrival.replyToDid, requestId: arrival.requestId, conversationId }
       }
       state.tasks.set(taskId, task)
       observeEdge('a2a.request_received', (observer) =>
@@ -1595,7 +1719,7 @@ export default {
       return { tasks: page.map((t) => snapshot(t.id, includeArtifacts)), nextPageToken: '', pageSize, totalSize: tasks.length }
     }
 
-    async function dispatch(body, signerDid, grant) {
+    async function dispatch(body, signerDid, grant, arrival) {
       let request
       try {
         request = JSON.parse(body)
@@ -1608,7 +1732,7 @@ export default {
       if (typeof method !== 'string' || method.length === 0) return rpcError(id, -32600, 'Request payload validation error')
       try {
         switch (method) {
-          case 'SendMessage': return rpcResult(id, await handleSendMessage(params, signerDid, grant))
+          case 'SendMessage': return rpcResult(id, await handleSendMessage(params, signerDid, grant, arrival && { ...arrival, requestId: id }))
           case 'GetTask': return rpcResult(id, handleGetTask(params))
           case 'CancelTask': return rpcResult(id, await handleCancelTask(params))
           case 'ListTasks': return rpcResult(id, handleListTasks(params))

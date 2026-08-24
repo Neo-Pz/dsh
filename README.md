@@ -45,7 +45,10 @@ another.
   connection — there is no relay-specific trust path, because there is no relay-specific message.
   The relay stores an opaque blob it holds no key for, cannot re-address it (the ciphertext is bound
   to its conversation, message id and recipient), and empties it on collection, keeping only the
-  delivery receipt.
+  delivery receipt. Answers come back the same way: a request that arrived with no connection to
+  reply on is answered by sealing the finished task and posting it back, carrying the JSON-RPC id it
+  was asked with. `iflow_send` does not block on that — a relayed peer may be asleep, and a person
+  there may have to accept first — so the answer surfaces on the conversation when it arrives.
 - **Pinned peer identities** — a peer's `did:key` is recorded the first time it is seen and every
   later sighting must match; a peer that presents a different key is refused, loudly, rather than
   believed. See *Key distribution* below for what that does and does not protect.
