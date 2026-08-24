@@ -35,6 +35,12 @@ iflow-id agentcard-sign <card.json>     为 AgentCard 签名（JWS）
 iflow-id agentcard-verify <signed.json> 校验签名 AgentCard
 iflow-id replay-check <nonce> <timestamp>  重放窗口检查（持久 nonce 缓存）
 
+密封信封（供 relay 转发用）：
+iflow-id seal <recipient-did> <plaintext-file> <out-file> [aad]
+  只有该 did 的持有者能打开；[aad] 绑定路由元数据
+iflow-id open <sealed-file> <out-file> [aad]
+  打开寄给本机身份的信封；不是给本机的、被篡改的、或 aad 对不上的一律失败退出
+
 授权书（P2 委托）：
 iflow-id grant create <delegate> <scope> <level> <expiry-ts>
       [--budget N] [--label S] [--capabilities CSV] [--deny CSV]
@@ -67,6 +73,37 @@ method\npath\nsha256(body)\nnonce\ntimestamp
 `agentcard-sign` 对规范化（key 排序）AgentCard JSON 做 JWS（EdDSA, flattened）：
 `protected.payload.signature`，`kid` = signer did，header 带 `iat`。
 `agentcard-verify` 还原并严格校验。能力列表可被第三方验证“确实是发布者发出的”。
+
+## 密封信封（relay 只搬运，不阅读）
+
+iFlow 的 relay 是点对点转发层：路由、在对方离线时排队、投递后删除。它唯一不能是的，
+就是「全网对话都可读」的地方——对运营者可读不行，对以后翻备份的人可读也不行。
+所以它搬运的是一个不透明的 blob，而这个 blob 由 `seal` 产生。
+
+构造是匿名 sealed box（libsodium `crypto_box_seal` 的形状）：
+
+```
+每条消息一对临时 X25519 密钥
+shared  = X25519(临时私钥, 收件人公钥)
+key     = HKDF-SHA256(shared, salt = 临时公钥 || 收件人公钥, info = "iflow-envelope-v1")
+payload = ChaCha20-Poly1305(key, nonce = 0, 明文, aad = 路由元数据)
+sealed  = "v1" || 临时公钥 || payload
+```
+
+几处刻意的取舍：
+
+- **nonce 恒为 0 是正确的，不是偷懒**。密钥来自一对只用一次的临时密钥，
+  (key, nonce) 组合不可能重复；再带一个随机 nonce 只是多几个字节和多一处可错的地方。
+- **匿名，尽管我们知道发件人是谁**。加密只负责保密；「这是谁发的」由信封上那条
+  独立的 Ed25519 签名回答（P1 层，`signing.rs`）。两个原语各做一件事，
+  比一个原语两件事都做不好要强——而且收件人验证发件人的规则，
+  在 relay 和直连 A2A 两条路上完全一样。
+- **aad 绑定路由元数据**。relay 读不了消息，但如果不绑定，它仍然可以把一段密文
+  当作另一条消息重新投递。绑定之后，换了 conversation / message id / 收件人就解不开。
+- **一把密钥两种用途**。X25519 密钥由既有的 Ed25519 身份派生，和 libsodium 的
+  `crypto_sign_ed25519_pk_to_curve25519` 同一手法。这是有记录的取舍而不是疏忽：
+  它意味着对端只要有你的 `did:key` 就能加密，不需要再发布、轮换、搞错第二把密钥。
+  以后想在 AgentCard 里放独立加密密钥也可以，线上格式没有挡住这条路。
 
 ## 安全边界（DESIGN.md §2）
 

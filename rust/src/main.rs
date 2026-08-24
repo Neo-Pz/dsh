@@ -5,6 +5,8 @@
 //!   show [--json]     print the public identity (never the secret)
 //!   sign-blob <file>  detached Ed25519 signature over a file's exact bytes
 //!   verify-blob <file> <signature> <did>   verify such a signature
+//!   seal <recipient-did> <plaintext-file> <out-file> [aad]  seal for a peer
+//!   open <sealed-file> <out-file> [aad]    open an envelope sealed to this node
 //!   sign <method> <path> <body>   build a signed request envelope
 //!   verify <json>     verify a signed request envelope
 //!   agentcard-sign <card.json>    sign an AgentCard (JWS)
@@ -21,6 +23,7 @@
 //!   usage report [--from DID] [--model M]    aggregate usage + cost report
 
 mod agentcard;
+mod envelope;
 mod grant;
 mod identity;
 mod nonce;
@@ -94,6 +97,8 @@ fn main() {
         "show" => cmd_show(&args[2..]),
         "sign-blob" => cmd_sign_blob(&args[2..]),
         "verify-blob" => cmd_verify_blob(&args[2..]),
+        "seal" => cmd_seal(&args[2..]),
+        "open" => cmd_open(&args[2..]),
         "sign" => cmd_sign(&args[2..]),
         "sign-file" => cmd_sign_file(&args[2..]),
         "verify" => cmd_verify(&args[2..]),
@@ -138,6 +143,12 @@ fn print_usage() {
          \x20 sign-file <method> <path> <body-file>\n\
          \x20                              sign a request envelope, body read from file\n\
          \x20 verify <envelope.json>   verify a request envelope\n\
+         \x20 seal <recipient-did> <plaintext-file> <out-file> [aad]\n\
+         \x20                              seal a message so only that peer can read it.\n\
+         \x20                              [aad] binds it to its routing metadata, so a\n\
+         \x20                              relay cannot redeliver it as another message.\n\
+         \x20 open <sealed-file> <out-file> [aad]\n\
+         \x20                              open an envelope sealed to this identity\n\
          \x20 agentcard-sign <card.json>\n\
          \x20                              sign an AgentCard (JWS JSON out)\n\
          \x20 agentcard-verify <signed.json>\n\
@@ -271,6 +282,57 @@ fn cmd_verify_blob(args: &[String]) -> Result<(), String> {
 
     DidKey(did.clone()).verify(&bytes, &sig)?;
     let out = serde_json::json!({ "ok": true, "signerDid": did });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Seal a message so only `recipient` can read it.
+///
+/// Everything travels as files rather than argv: a message body easily exceeds
+/// the Windows command-line limit, and the same reasoning already governs
+/// `sign-file`. The `aad` is small and routing-only, so it stays an argument.
+fn cmd_seal(args: &[String]) -> Result<(), String> {
+    let (did, plaintext_file, out_file, aad) = match args {
+        [d, p, o] => (d.clone(), p.clone(), o.clone(), String::new()),
+        [d, p, o, a] => (d.clone(), p.clone(), o.clone(), a.clone()),
+        _ => return Err("usage: iflow-id seal <recipient-did> <plaintext-file> <out-file> [aad]".into()),
+    };
+    let plaintext =
+        std::fs::read(&plaintext_file).map_err(|e| format!("cannot read {plaintext_file}: {e}"))?;
+    let sealed = envelope::seal(&DidKey(did.clone()), &plaintext, aad.as_bytes())?;
+    std::fs::write(&out_file, &sealed).map_err(|e| format!("cannot write {out_file}: {e}"))?;
+    let out = serde_json::json!({
+        "ok": true,
+        "recipientDid": did,
+        "bytes": sealed.len(),
+        "path": out_file,
+    });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Open an envelope sealed to this node's identity.
+///
+/// Exits non-zero when the envelope was not for this identity, was altered, or
+/// arrived under different routing metadata than it was sealed with — so a
+/// caller can branch on the exit code without parsing anything.
+fn cmd_open(args: &[String]) -> Result<(), String> {
+    let (sealed_file, out_file, aad) = match args {
+        [s, o] => (s.clone(), o.clone(), String::new()),
+        [s, o, a] => (s.clone(), o.clone(), a.clone()),
+        _ => return Err("usage: iflow-id open <sealed-file> <out-file> [aad]".into()),
+    };
+    let sealed = std::fs::read(&sealed_file).map_err(|e| format!("cannot read {sealed_file}: {e}"))?;
+    let identity = load_identity()?;
+    let signing = identity.signing_key()?;
+    let plaintext = envelope::open(&signing, &sealed, aad.as_bytes())?;
+    std::fs::write(&out_file, &plaintext).map_err(|e| format!("cannot write {out_file}: {e}"))?;
+    let out = serde_json::json!({
+        "ok": true,
+        "recipientDid": identity.did,
+        "bytes": plaintext.len(),
+        "path": out_file,
+    });
     println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
     Ok(())
 }
