@@ -157,7 +157,7 @@ function createStubContext(workspace) {
   }
 
   /** POST a JSON body to a mounted route and return { status, json }. */
-  const post = (path, body, headers = {}) =>
+  const post = (path, body, headers = {}, remoteAddress = '127.0.0.1') =>
     new Promise((resolve, reject) => {
       const handler = routes.get(path)
       if (!handler) return reject(new Error(`no route mounted at ${path}`))
@@ -166,6 +166,7 @@ function createStubContext(workspace) {
         method: 'POST',
         url: path,
         headers,
+        socket: { remoteAddress },
         on(event, cb) {
           if (event === 'data') cb(Buffer.from(payload, 'utf8'))
           if (event === 'end') cb()
@@ -187,7 +188,7 @@ function createStubContext(workspace) {
     })
 
   /** Call a mounted route and return { status, json }. */
-  const call = (path, query = {}, headers = {}) =>
+  const call = (path, query = {}, headers = {}, remoteAddress = '127.0.0.1') =>
     new Promise((resolve, reject) => {
       const handler = routes.get(path)
       if (!handler) return reject(new Error(`no route mounted at ${path}`))
@@ -197,6 +198,7 @@ function createStubContext(workspace) {
         method: 'GET',
         url: search ? `${path}?${search}` : path,
         headers,
+        socket: { remoteAddress },
         on() {},
       }
       let status = 0
@@ -266,6 +268,14 @@ describe('iFlow edge inside a stub DSH host', () => {
     for (const path of ['/a2a', '/.well-known/agent-card.json', '/iflow/version.json', '/iflow/latest.js']) {
       assert.ok(host.routes.has(path), `expected the existing route ${path} to survive`)
     }
+  })
+
+  it('keeps the Origin Journal and projections local when no token is configured', async () => {
+    const local = await host.call('/iflow/edge/status')
+    assert.equal(local.status, 200)
+
+    const remote = await host.call('/iflow/journal', {}, {}, '192.168.1.42')
+    assert.equal(remote.status, 401)
   })
 
   it('warns about the secrets it keeps in the clear', async () => {

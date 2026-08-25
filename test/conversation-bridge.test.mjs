@@ -394,7 +394,6 @@ describe('the local mapping never leaves the machine', () => {
       const binding = readConversations(workspace).conversations[task.contextId].binding.localSessionId
 
       const outboxPath = join(workspace, '.iflow', 'edge', 'outbox.ndjson')
-      await waitFor(() => existsSync(outboxPath), 'the outbox to exist')
 
       // Observation is fire-and-forget by design — it must never delay the
       // work it observes — so wait for the fact rather than racing it.
@@ -406,7 +405,7 @@ describe('the local mapping never leaves the machine', () => {
         'the exchange to be journaled',
       )
       const journal = readJournal()
-      const outbox = readFileSync(outboxPath, 'utf8')
+      const outbox = existsSync(outboxPath) ? readFileSync(outboxPath, 'utf8') : ''
       const queuedIds = new Set(
         outbox.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).eventId),
       )
@@ -417,6 +416,10 @@ describe('the local mapping never leaves the machine', () => {
         assert.ok(!type.startsWith('workspace.'), `${type} must never be queued for upload`)
       }
       assert.equal(outbox.includes(binding), false, 'no local session id in the outbox')
+      assert.ok(
+        journal.filter((event) => event.type.startsWith('conversation.')).every((event) => event.visibility === 'local'),
+        'conversation history is signed as local fact, not merely hidden by a projection',
+      )
 
       // And the conversation facts that ARE journaled carry a digest, not text.
       const messageFacts = journal.filter((e) => e.type.startsWith('conversation.message'))

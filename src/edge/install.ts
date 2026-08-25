@@ -19,6 +19,7 @@ import {
 } from '../runtime/dsh-command-executor.js'
 import { installDshInstrumentation } from '../runtime/dsh-instrumentation.js'
 import { createDshPorts } from '../runtime/dsh-ports.js'
+import { isLoopbackRequest } from './panel.js'
 import { startCommunitySync } from './sync.js'
 
 /**
@@ -47,7 +48,8 @@ function deriveNodeId(workspace) {
  * @param options.workspace  DSH's workspace root
  * @param options.alias      this node's display name (the plugin's `state.alias`)
  * @param options.version    plugin sync version, recorded on the edge's agent
- * @param options.did        this node's did:key, when the identity exists
+ * @param options.nodeDid    this Runtime Node's did:key. It is neither the
+ *                           Principal Authority nor a declared Agent key.
  * @param options.token      shared bearer token, or a getter for it. The
  *                           operator can set the token at runtime with
  *                           `iflow_set_token`, so pass a getter to keep the
@@ -78,7 +80,7 @@ export async function installIFlowEdge(ctx, options) {
     capabilities: options.capabilities ?? [],
     selfAgentId: `node-${nodeId}`,
     selfAgentLabel: options.alias ?? 'iflow-edge',
-    did: options.did ?? undefined,
+    did: options.nodeDid ?? undefined,
     // The DID of every Agent an operator declared on this node, so an event one
     // of them issues carries the key a verifier should check it against.
     agentDids: options.agentDids ?? undefined,
@@ -129,9 +131,12 @@ export async function installIFlowEdge(ctx, options) {
       // been configured to bind a LAN address, so it reuses the plugin's own
       // bearer check rather than assuming the port is private.
       authorize: (request) => {
+        if (isLoopbackRequest(request)) return true
         const token = currentToken()
-        if (!token) return true
-        return request.headers['authorization'] === `Bearer ${token}`
+        // No token means no remote read channel. Origin Journal and its private
+        // projections remain available to the local Hub, but binding DSH to
+        // 0.0.0.0 must not silently turn local Agent history into a LAN API.
+        return Boolean(token && request.headers['authorization'] === `Bearer ${token}`)
       },
       // The standalone Web app is served from its own dev origin.
       allowedOrigins: options.allowedOrigins,

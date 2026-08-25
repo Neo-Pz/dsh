@@ -43,6 +43,9 @@ export const api = {
   setVisibility: (visibility) => call('/iflow/panel/visibility', { method: 'POST', body: { visibility } }),
   fetchIdentity: () => call('/iflow/panel/identity/fetch', { method: 'POST' }),
   declarePrincipal: (label) => call('/iflow/panel/principal/declare', { method: 'POST', body: { label } }),
+  bindPrincipal: (principalId) => call('/iflow/panel/principal/bind', { method: 'POST', body: { principalId } }),
+  principalMigrationPlan: () => call('/iflow/panel/principal/migration/plan', { method: 'POST' }),
+  migratePrincipal: (input) => call('/iflow/panel/principal/migration/execute', { method: 'POST', body: input }),
   declareAgent: (input) => call('/iflow/panel/agents/declare', { method: 'POST', body: input }),
 
   // Conversations: the inbox, and the two answers a person can give it.

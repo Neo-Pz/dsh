@@ -131,6 +131,7 @@ function createHost(workspace) {
         method,
         url: search ? `${path}?${search}` : path,
         headers,
+        socket: { remoteAddress: '127.0.0.1' },
         on(event, cb) {
           if (event === 'data' && payload !== undefined) cb(Buffer.from(payload, 'utf8'))
           if (event === 'end') cb()
@@ -226,12 +227,12 @@ describe('the five failure tests, against a real on-disk journal', () => {
     assert.equal(agents.status, 200)
     assert.ok(agents.json.data.agents.some((a) => a.id === 'agent-sess-a'))
 
-    // The facts are queued for a Community that does not exist yet, rather
-    // than dropped — that queue is what makes catching up possible later.
+    // P0 facts default to signed `local`. Installing a plugin or starting a
+    // runtime is not consent to publish, so no outbox is created until an Agent
+    // intentionally emits a public fact.
     const outbox = join(workspace, '.iflow', 'edge', 'outbox.ndjson')
-    const queued = readFileSync(outbox, 'utf8').trim().split('\n').filter(Boolean)
-    assert.equal(queued.length, events.length)
-    assert.ok(queued.every((line) => JSON.parse(line).state === 'queued'))
+    assert.ok(events.every((event) => event.visibility === 'local'))
+    assert.equal(existsSync(outbox) ? readFileSync(outbox, 'utf8').trim() : '', '')
   })
 
   it('2. a lost acknowledgement does not create a second fact on retry', async () => {

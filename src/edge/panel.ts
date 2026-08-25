@@ -91,7 +91,9 @@ export function installPanelRoutes(ctx, webServer, deps) {
   const routes = [
     ['/iflow/panel/state', 'GET', guard(async (_request, response) => {
       send(response, 200, await deps.state())
-    }, { write: false })],
+    // Despite being a read, this contains Workspace path, Principal binding,
+    // My Agents and migration state. It is a private control-plane view.
+    }, { write: true })],
 
     ['/iflow/panel/claim/start', 'POST', guard(async (_request, response) => {
       send(response, 200, await deps.claimStart())
@@ -118,6 +120,23 @@ export function installPanelRoutes(ctx, webServer, deps) {
     ['/iflow/panel/principal/declare', 'POST', guard(async (request, response) => {
       const body = await readJson(request)
       send(response, 200, await deps.declarePrincipal(body.label))
+    }, { write: true })],
+
+    ['/iflow/panel/principal/bind', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.bindPrincipal(body.principalId))
+    }, { write: true })],
+
+    // This is deliberately a POST even though it only plans: the response
+    // reveals private identity bindings and legacy key state. It therefore
+    // takes the same local-machine guard as the operation it previews.
+    ['/iflow/panel/principal/migration/plan', 'POST', guard(async (_request, response) => {
+      send(response, 200, await deps.principalMigrationPlan())
+    }, { write: true })],
+
+    ['/iflow/panel/principal/migration/execute', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.migratePrincipal(body))
     }, { write: true })],
 
     ['/iflow/panel/agents/declare', 'POST', guard(async (request, response) => {

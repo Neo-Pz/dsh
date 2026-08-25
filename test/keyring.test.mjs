@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
-const { agentDidsOf, agentHome, homeForSigning, nodeHome, principalHome } = await import(
+const { agentDidsOf, agentHome, authorityHome, homeForSigning, nodeHome } = await import(
   pathToFileURL(join(import.meta.dirname, '..', 'src', 'identity', 'keyring.ts')).href
 )
 const { createIflowIdSigner } = await import(
@@ -20,9 +20,15 @@ const { createIflowIdSigner } = await import(
 )
 
 const WORKSPACE = '/ws'
+const PRINCIPAL_STORE = '/profile/.iflowone'
 
 const declarations = {
-  principal: { did: 'did:key:zPrincipal', label: 'Acme Ltd' },
+  principal: {
+    principalId: 'iflow:principal:11111111-1111-4111-8111-111111111111',
+    authorityDid: 'did:key:zPrincipal',
+    authorityVersion: 1,
+    label: 'Acme Ltd',
+  },
   agents: [
     { agentId: 'writer', did: 'did:key:zWriter', capabilities: ['iflow.cap:task.run'] },
     { agentId: 'reviewer', did: 'did:key:zReviewer', capabilities: [] },
@@ -36,8 +42,8 @@ describe('choosing a key', () => {
       agentHome(join, WORKSPACE, 'writer'),
     )
     assert.equal(
-      homeForSigning(join, WORKSPACE, declarations, { did: 'did:key:zPrincipal' }),
-      principalHome(join, WORKSPACE),
+      homeForSigning(join, WORKSPACE, declarations, { did: 'did:key:zPrincipal' }, undefined, PRINCIPAL_STORE),
+      authorityHome(join, PRINCIPAL_STORE, declarations.principal.principalId, 1),
     )
     assert.equal(
       homeForSigning(join, WORKSPACE, declarations, { agentId: 'reviewer' }),

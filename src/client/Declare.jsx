@@ -24,7 +24,7 @@ const SUGGESTED_CAPABILITIES = [
   'iflow.cap:a2a.receive',
 ]
 
-function PrincipalForm({ busy, onDeclare }) {
+function PrincipalForm({ busy, availablePrincipals, onDeclare, onBind }) {
   const [label, setLabel] = React.useState('')
 
   return (
@@ -35,11 +35,30 @@ function PrincipalForm({ busy, onDeclare }) {
         它持有一把密钥，用来签发授权给下面的 Agent；将来对外达成的协议，也由这把密钥签字。
       </p>
       <p className="ifp-muted">
-        这把密钥是这个节点上所有授权的根，只创建一次。换掉它会让已经签发的授权全部失效。
-        密钥保存在本机 <span className="ifp-mono">.iflow/principal/</span>，不会离开这台机器。
+        Principal 是稳定的人或组织身份；签名密钥只是可轮换的 Authority。
+        Authority 保存在用户级 <span className="ifp-mono">~/.iflowone/</span>，Workspace 只保存绑定。
       </p>
+      {availablePrincipals?.length > 0 ? (
+        <div className="ifp-field">
+          <span>绑定已有 Principal</span>
+          <ul className="ifp-list">
+            {availablePrincipals.map((principal) => (
+              <li key={principal.principalId}>
+                <span>
+                  <b>{principal.label || 'Principal'}</b>
+                  <br />
+                  <span className="ifp-mono ifp-muted ifp-wrap">{principal.principalId}</span>
+                </span>
+                <button className="ifp-btn" disabled={busy} onClick={() => onBind(principal.principalId)}>
+                  绑定到此 Workspace
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <label className="ifp-field">
-        <span>名称（对外显示，可以是你的名字或公司名）</span>
+        <span>{availablePrincipals?.length ? '或者创建新的 Principal' : '名称（可以是你的名字或公司名）'}</span>
         <input
           value={label}
           onChange={(event) => setLabel(event.target.value)}
@@ -50,6 +69,58 @@ function PrincipalForm({ busy, onDeclare }) {
       <div className="ifp-actions">
         <button className="ifp-btn primary" disabled={busy || !label.trim()} onClick={() => onDeclare(label.trim())}>
           {busy ? '正在生成密钥…' : '声明负责人'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function PrincipalMigration({ migration, busy, onMigrate }) {
+  const [confirmed, setConfirmed] = React.useState(false)
+  if (!migration || migration.state === 'ambiguous') {
+    return (
+      <div className="ifp-card ifp-consent">
+        <h3>Principal 迁移已暂停</h3>
+        <p>
+          {migration
+            ? '同一 Authority DID 对应多个稳定 Principal，插件不会猜测应该绑定哪一个。请先修复用户级 Principal Registry。'
+            : '无法生成旧 Principal 的迁移计划。插件不会在缺少明确计划时修改任何身份数据。'}
+        </p>
+        {migration?.candidates?.map((principalId) => (
+          <p className="ifp-mono ifp-wrap" key={principalId}>{principalId}</p>
+        ))}
+      </div>
+    )
+  }
+  if (migration.state !== 'required') return null
+  return (
+    <div className="ifp-card ifp-consent">
+      <h3>需要迁移旧 Principal</h3>
+      <p>
+        旧版本把 Principal 密钥放在当前 Workspace。迁移会先备份旧密钥和 Agent 声明，再把它复制到用户级
+        iFlowOne 身份库；旧密钥不会被删除。
+      </p>
+      <p className="ifp-mono ifp-wrap">{migration.legacyAuthorityDid}</p>
+      <p className="ifp-muted">
+        {migration.action === 'bind-existing'
+          ? `这把 Authority 已属于 ${migration.targetPrincipalId}，将绑定到同一个稳定 Principal。`
+          : '这把 Authority 尚未登记，将创建一个新的稳定 Principal。'}
+        {' '}现有 Agent：{migration.agentCount ?? 0}。
+      </p>
+      <label className="ifp-cap">
+        <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+        <span>我已核对上面的 Authority DID，并同意创建本地备份后迁移</span>
+      </label>
+      <div className="ifp-actions">
+        <button
+          className="ifp-btn primary"
+          disabled={busy || !confirmed}
+          onClick={() => onMigrate({
+            expectedAuthorityDid: migration.legacyAuthorityDid,
+            targetPrincipalId: migration.targetPrincipalId || undefined,
+          })}
+        >
+          {busy ? '正在备份并迁移…' : '备份并迁移'}
         </button>
       </div>
     </div>
@@ -119,11 +190,32 @@ function AgentForm({ busy, onDeclare, onCancel }) {
   )
 }
 
-export function DeclareSection({ principal, agents, busy, onDeclarePrincipal, onDeclareAgent }) {
+export function DeclareSection({
+  principal,
+  agents,
+  availablePrincipals,
+  principalMigration,
+  busy,
+  onDeclarePrincipal,
+  onBindPrincipal,
+  onMigratePrincipal,
+  onDeclareAgent,
+}) {
   const [adding, setAdding] = React.useState(false)
 
+  if (principal?.legacy) {
+    return <PrincipalMigration migration={principalMigration} busy={busy} onMigrate={onMigratePrincipal} />
+  }
+
   if (!principal) {
-    return <PrincipalForm busy={busy} onDeclare={onDeclarePrincipal} />
+    return (
+      <PrincipalForm
+        busy={busy}
+        availablePrincipals={availablePrincipals}
+        onDeclare={onDeclarePrincipal}
+        onBind={onBindPrincipal}
+      />
+    )
   }
 
   return (
@@ -136,9 +228,10 @@ export function DeclareSection({ principal, agents, busy, onDeclarePrincipal, on
         <p>
           <b>{principal.label}</b>
         </p>
-        <p className="ifp-mono">{principal.did}</p>
+        <p className="ifp-mono ifp-wrap">{principal.principalId}</p>
         <p className="ifp-muted">
-          这台机器上的 Agent 都由它签发授权。对外达成的协议由它签字才算数。
+          Authority v{principal.authorityVersion} · <span className="ifp-mono">{principal.authorityDid}</span>
+          <br />这台机器上的 Agent 由它授权；换 Workspace 不会创建新的 Principal。
         </p>
       </div>
 

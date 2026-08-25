@@ -45,7 +45,14 @@ function baseState(overrides = {}) {
     journal: { nodeId: 'node-1', lastSeq: 12, syncedSeq: 12 },
     pendingFacts: 0,
     publishing: null,
-    principal: { did: 'did:key:zPrincipal', label: 'Acme' },
+    principal: {
+      principalId: 'iflow:principal:11111111-1111-4111-8111-111111111111',
+      authorityDid: 'did:key:zPrincipal',
+      authorityVersion: 1,
+      label: 'Acme',
+    },
+    principalMigration: { state: 'complete' },
+    availablePrincipals: [],
     declaredAgents: [
       { agentId: 'writer', label: 'Writer', did: 'did:key:zWriter', capabilities: ['iflow.cap:task.run'] },
     ],
@@ -267,6 +274,66 @@ describe('the Hub', () => {
     assert.match(container.textContent, /node-1/)
     assert.match(container.textContent, /F:\/work/)
     assert.match(container.textContent, /新对话需要你同意/)
+  })
+
+  it('requires an explicit confirmation before migrating a legacy Principal', async () => {
+    const current = responses['/iflow/panel/state']
+    responses['/iflow/panel/state'] = baseState({
+      principal: {
+        legacy: true,
+        principalId: null,
+        authorityDid: 'did:key:zLegacy',
+        authorityVersion: 1,
+        label: 'Legacy owner',
+      },
+      principalMigration: {
+        state: 'required',
+        action: 'import-new',
+        legacyAuthorityDid: 'did:key:zLegacy',
+        agentCount: 1,
+      },
+    })
+    try {
+      await mount(slots.get('settings.section'))
+      await clickTab('我')
+      assert.match(container.textContent, /需要迁移旧 Principal/)
+      assert.match(container.textContent, /did:key:zLegacy/)
+      const migrate = [...container.querySelectorAll('button')].find((button) => button.textContent.includes('备份并迁移'))
+      assert.ok(migrate)
+      assert.equal(migrate.disabled, true, 'the DID acknowledgement is not optional')
+    } finally {
+      responses['/iflow/panel/state'] = current
+    }
+  })
+
+  it('stops instead of guessing when one Authority maps to multiple Principals', async () => {
+    const current = responses['/iflow/panel/state']
+    responses['/iflow/panel/state'] = baseState({
+      principal: {
+        legacy: true,
+        principalId: null,
+        authorityDid: 'did:key:zAmbiguous',
+        authorityVersion: 1,
+        label: 'Legacy owner',
+      },
+      principalMigration: {
+        state: 'ambiguous',
+        legacyAuthorityDid: 'did:key:zAmbiguous',
+        candidates: ['iflow:principal:first-owner', 'iflow:principal:second-owner'],
+      },
+    })
+    try {
+      await mount(slots.get('settings.section'))
+      await clickTab('我')
+      assert.match(container.textContent, /迁移已暂停/)
+      assert.match(container.textContent, /不会猜测/)
+      assert.equal(
+        [...container.querySelectorAll('button')].some((button) => button.textContent.includes('迁移')),
+        false,
+      )
+    } finally {
+      responses['/iflow/panel/state'] = current
+    }
   })
 })
 

@@ -122,7 +122,18 @@ export function createHttpServerPort(ctx, options = {}) {
     for (const [key, value] of Object.entries(req.headers ?? {})) {
       headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value ?? '')
     }
-    return { method: req.method ?? 'GET', path: url.pathname, query, headers, body }
+    // The SDK's authorization hook must be able to distinguish a request from
+    // this machine from one arriving over the LAN. In a real Node server the
+    // socket is always present; preserving only the address keeps the port
+    // transport-neutral without leaking the mutable socket object downstream.
+    return {
+      method: req.method ?? 'GET',
+      path: url.pathname,
+      query,
+      headers,
+      body,
+      socket: { remoteAddress: req.socket?.remoteAddress },
+    }
   }
 
   const readBody = (req) =>

@@ -147,6 +147,27 @@ iflow_add_peer name=if-lt-b url=… did=did:key:z6Mk…
 `iflow_discover` prints a short fingerprint (`z6Mkeuov…RaKZWg3`) for exactly this: reading 48 base58
 characters down a phone line is how key verification stops happening.
 
+## Stable Principal storage and legacy migration
+
+The four identities are deliberately different:
+
+- `principalId` — stable person/organization identity (`iflow:principal:…`);
+- `authorityDid` — its current, versioned signing key;
+- `nodeDid` — this Runtime Node's key;
+- `agentDid` — one declared Agent's key.
+
+Principal Authorities live in `~/.iflowone/principals/` (or `IFLOWONE_HOME`), while a Workspace
+keeps only `.iflow/principal-binding.json`. This is what lets three Workspaces belong to one
+Principal without sharing Node or Agent keys. The local panel lists existing Principals explicitly;
+selecting one verifies its Authority key before writing the binding.
+
+Older versions put the Principal key at `<workspace>/.iflow/principal/`. The panel does not move or
+merge it on startup. It first shows a dry-run containing the exact legacy Authority DID and proposed
+target; execution requires confirming that DID, backs up the key and `agents.json` under
+`.iflow/backups/`, copies the Authority into the user-level store, verifies the copy, and keeps the
+legacy key for rollback. Two different legacy DIDs are two different Principals unless a future
+explicit recovery/merge protocol proves otherwise.
+
 ## The protocol
 
 - **Transport**: JSON-RPC 2.0 over HTTP (`/a2a`), AgentCard at `/.well-known/agent-card.json`.
@@ -171,6 +192,8 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
   loop. Sealing itself is `iflow-id seal` / `open` in `rust/src/envelope.rs`.
 - `src/identity/pinning.ts` — trust on first use for a peer's `did:key`, and the refusal when it
   changes.
+- `src/identity/keyring.ts` — stable Principal registry, Workspace binding, versioned Authority and
+  Agent key routing, plus the explicit legacy migration transaction.
 - `src/runtime/dsh-ports.ts` — DSH implementations of the iFlow `RuntimePorts` (storage, subprocess,
   HTTP, clock, logger, ids).
 - `src/runtime/dsh-instrumentation.ts` — the only place that maps DSH lifecycle events to iFlow
@@ -183,7 +206,8 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
   sandbox's hand-rolled SHA-256), extracted so they can be unit tested.
 - `rust/` — the `iflow-id` reference implementation (identity/store, signing, AgentCard, grants,
   pricing, usage), invoked via `ctx.subprocess`.
-- Runtime state lives under `<workspace>/.iflow/` (identity, nonces, peers, mailbox, conversations,
+- Principal identity lives under `~/.iflowone/`; Runtime state lives under `<workspace>/.iflow/`
+  (Node/Agent identity, bindings, nonces, peers, mailbox, conversations,
   trust, usage, pricing) and `<workspace>/.iflow/edge/` (origin journal, outbox, command ledger,
   checkpoint). The split is load-bearing: only `edge/` is ever read by anything that publishes, so
   the session bindings and message excerpts one level up cannot leave the machine by construction.

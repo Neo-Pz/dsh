@@ -201,11 +201,25 @@ export function IFlowPanel({ state, onChanged }) {
       <DeclareSection
         principal={state.principal ?? null}
         agents={state.declaredAgents ?? []}
+        availablePrincipals={state.availablePrincipals ?? []}
+        principalMigration={state.principalMigration ?? null}
         busy={busy}
         onDeclarePrincipal={(label) =>
           act(async () => {
             const result = await api.declarePrincipal(label)
             if (!result.ok) throw new Error(result.error ?? '声明失败')
+          })
+        }
+        onBindPrincipal={(principalId) =>
+          act(async () => {
+            const result = await api.bindPrincipal(principalId)
+            if (!result.ok) throw new Error(result.error ?? '绑定失败')
+          })
+        }
+        onMigratePrincipal={(input) =>
+          act(async () => {
+            const result = await api.migratePrincipal(input)
+            if (!result.ok) throw new Error(result.error ?? '迁移失败')
           })
         }
         onDeclareAgent={(input) =>

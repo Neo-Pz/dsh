@@ -129,6 +129,7 @@ function createStubContext(workspace) {
         method: 'POST',
         url: path,
         headers,
+        socket: { remoteAddress: '127.0.0.1' },
         on(event, cb) {
           if (event === 'data') cb(Buffer.from(payload, 'utf8'))
           if (event === 'end') cb()
@@ -153,7 +154,13 @@ function createStubContext(workspace) {
     new Promise((resolve, reject) => {
       const handler = routes.get(path)
       if (!handler) return reject(new Error(`no route mounted at ${path}`))
-      const req = { method: 'GET', url: path, headers, on() {} }
+      const req = {
+        method: 'GET',
+        url: path,
+        headers,
+        socket: { remoteAddress: '127.0.0.1' },
+        on() {},
+      }
       let status = 0
       const res = {
         writeHead(code) {

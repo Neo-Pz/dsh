@@ -5,7 +5,19 @@ import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
 import { clearCommunitySettings, loadCommunitySettings, saveCommunitySettings } from './edge/community-config.js'
 import { installPanelRoutes } from './edge/panel.js'
-import { agentDidsOf, agentHome, homeForSigning, loadDeclarations, principalHome, saveDeclarations } from './identity/keyring.js'
+import {
+  agentDidsOf,
+  agentHome,
+  bindPrincipal as bindPrincipalIdentity,
+  declareAgent as declareAgentIdentity,
+  declarePrincipal as declarePrincipalIdentity,
+  defaultPrincipalStoreRoot,
+  homeForSigning,
+  loadDeclarations,
+  loadPrincipalRegistry,
+  migrateLegacyPrincipal,
+  planPrincipalMigration,
+} from './identity/keyring.js'
 import { PinMismatchError, didFingerprint, looksLikeDid, reconcileDid } from './identity/pinning.js'
 import { helpAdvertises, missingCapabilities, staleBinaryAdvice } from './identity/capabilities.js'
 import { relayDecision } from './relay/envelope.js'
@@ -57,6 +69,9 @@ export default {
     const webServer = ctx.webServer
     const agents = ctx.agents
     const workspace = ctx.sandboxPolicy.workspaceRoot
+    const principalStoreRoot = typeof config.principalStoreRoot === 'string' && config.principalStoreRoot.trim()
+      ? config.principalStoreRoot.trim()
+      : defaultPrincipalStoreRoot(join)
     const allowPeerUpdate = config.allowPeerUpdate === true
     // Writing into DSH's own session store is opt-in and, today, broken — see
     // `recordExchange`. The exchange is journaled either way.
@@ -105,7 +120,9 @@ export default {
       trust: { default: 'ask', peers: {}, blocked: [] },
       // This node's own did:key, cached when the edge comes up so a
       // conversation participant can carry it without an await.
-      identityDid: null,
+      nodeDid: null,
+      // Stable owner/account identity. Never substituted with nodeDid.
+      principalId: null,
       // The Community this node publishes to, which is also its relay. Cached
       // at edge start (and cleared when publishing stops) so the send path can
       // ask without reading a file mid-request.
@@ -301,7 +318,7 @@ export default {
 
     /** The two ends of a thread, as the domain models participants. */
     function participantsFor(conversation, initiator) {
-      const mine = { agentId: selfAgentId(), did: state.identityDid ?? undefined, role: 'recipient', joinedAt: iso() }
+      const mine = { agentId: selfAgentId(), did: state.nodeDid ?? undefined, role: 'recipient', joinedAt: iso() }
       const theirs = {
         agentId: conversation.peer ?? 'remote',
         did: conversation.peerDid ?? undefined,
@@ -519,7 +536,7 @@ export default {
             messageId,
             actorType: 'human',
             origin: 'keyboard',
-            principalId: state.identityDid ?? undefined,
+            principalId: state.principalId ?? undefined,
             // So the recipient can tell how this arrived. It changes nothing
             // about verification; it is for the operator reading a thread.
             via: 'relay',
@@ -550,7 +567,7 @@ export default {
         signature,
         conversationId,
         messageId,
-        fromDid: state.identityDid,
+        fromDid: state.nodeDid,
       })
       const answer = await relay.send({
         url: settings.url,
@@ -559,7 +576,7 @@ export default {
         sealed,
         messageId,
         conversationId,
-        fromDid: state.identityDid,
+        fromDid: state.nodeDid,
       })
       if (answer && answer.state === 'queued') {
         const conversation = state.conversations[conversationId]
@@ -702,7 +719,7 @@ ${text}`)
           signature: null,
           conversationId: task.replyTo.conversationId,
           messageId,
-          fromDid: state.identityDid,
+          fromDid: state.nodeDid,
         })
         const answer = await relay.send({
           url: settings.url,
@@ -711,7 +728,7 @@ ${text}`)
           sealed,
           messageId,
           conversationId: task.replyTo.conversationId,
-          fromDid: state.identityDid,
+          fromDid: state.nodeDid,
         })
         if (!answer || answer.state !== 'queued') {
           console.error(`iFlow relay: could not return the answer for ${taskId}: ${JSON.stringify(answer)}`)
@@ -724,7 +741,7 @@ ${text}`)
     /** Which Agents this node can be reached about. */
     function relayRoster() {
       const roster = []
-      if (state.identityDid) roster.push({ did: state.identityDid, label: state.alias, state: 'online' })
+      if (state.nodeDid) roster.push({ did: state.nodeDid, label: state.alias, state: 'online' })
       for (const [agentId, did] of Object.entries(state.declaredAgentDids ?? {})) {
         if (did) roster.push({ did, label: agentId, state: 'online' })
       }
@@ -1103,8 +1120,9 @@ ${text}`)
         )
       }
       const handle = ctx.subprocess.spawn({
-        // --home keeps the store inside the sandbox's writable root (the store
-        // appends .iflow itself); --node-home keeps revocations node-wide.
+        // --home selects the Node, Agent, legacy, or user-level Authority
+        // store explicitly (the binary appends .iflow itself). --node-home
+        // keeps revocations node-wide, whichever identity is signing.
         argv: [bin, '--home', home ?? workspace, '--node-home', workspace, ...args],
         cwd: workspace,
         stdio: { stdin: 'ignore', stdout: { maxBytes: 4 * 1024 * 1024 }, stderr: { maxBytes: 256 * 1024 } },
@@ -2676,7 +2694,7 @@ ${text}`)
                 messageId,
                 actorType: 'human',
                 origin: 'keyboard',
-                principalId: state.identityDid ?? undefined,
+                principalId: state.principalId ?? undefined,
               },
             })
           } catch (err) {
@@ -3282,13 +3300,14 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
      */
     async function startEdge() {
       const identity = await getIdentity()
-      state.identityDid = identity.did ?? null
+      state.nodeDid = identity.did ?? null
       const community = await resolveCommunity()
       state.community = community ?? null
       // Who this node speaks for. An Agent exists because a person declared it;
       // a node that has declared nothing still runs, and still journals, under
       // its own key alone.
       const declarations = await loadDeclarations(ctx, join, workspace)
+      state.principalId = declarations.principal?.principalId ?? null
       // Same read, kept for the relay roster: these are the Agents this node
       // asks to have messages routed to it for.
       state.declaredAgentDids = agentDidsOf(declarations)
@@ -3296,7 +3315,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         workspace,
         alias: state.alias,
         version: state.syncVersion,
-        did: identity.did,
+        nodeDid: identity.did,
         // A getter, not the value: the token can change after this call.
         token: () => state.token,
         capabilities: ['iflow.cap:task.run', 'iflow.cap:tool.call', 'iflow.cap:a2a.receive'],
@@ -3307,7 +3326,8 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         // with. Read once per edge start: declaring an Agent restarts the edge,
         // so this cannot go stale behind the journal's back.
         agentDids: agentDidsOf(declarations),
-        resolveSigningHome: (context) => homeForSigning(join, workspace, declarations, context, identity.did),
+        resolveSigningHome: (context) =>
+          homeForSigning(join, workspace, declarations, context, identity.did, principalStoreRoot),
         writeScratch: async (name, bytes) => {
           const path = scratchPath(name)
           writeFileSync(path, Buffer.from(bytes))
@@ -3414,8 +3434,64 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
 
       async declarePrincipal(label) {
         try {
-          const principal = await declarePrincipal(ctx, join, workspace, (a, home) => iflowId(a, home), label)
+          const principal = await declarePrincipalIdentity(
+            ctx,
+            join,
+            workspace,
+            principalStoreRoot,
+            (args, home) => iflowId(args, home),
+            label,
+          )
+          state.principalId = principal.principalId
+          await restartEdge()
           return { ok: true, principal }
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
+      async bindPrincipal(principalId) {
+        try {
+          const principal = await bindPrincipalIdentity(
+            ctx,
+            join,
+            workspace,
+            principalStoreRoot,
+            (args, home) => iflowId(args, home),
+            principalId,
+          )
+          state.principalId = principal.principalId
+          await restartEdge()
+          return { ok: true, principal }
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
+      async principalMigrationPlan() {
+        try {
+          return { ok: true, ...(await planPrincipalMigration(ctx, join, workspace, principalStoreRoot)) }
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
+      async migratePrincipal(input) {
+        try {
+          const result = await migrateLegacyPrincipal(
+            ctx,
+            join,
+            workspace,
+            principalStoreRoot,
+            (args, home) => iflowId(args, home, 30),
+            {
+              expectedAuthorityDid: input?.expectedAuthorityDid,
+              targetPrincipalId: input?.targetPrincipalId,
+            },
+          )
+          state.principalId = result.principal?.principalId ?? null
+          await restartEdge()
+          return { ok: true, ...result }
         } catch (err) {
           return { ok: false, error: err && err.message ? err.message : String(err) }
         }
@@ -3455,7 +3531,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
 
       async declareAgent(input) {
         try {
-          const { declared } = await declareAgent(ctx, join, workspace, (a, home) => iflowId(a, home, 30), {
+          const { declared } = await declareAgentIdentity(ctx, join, workspace, principalStoreRoot, (a, home) => iflowId(a, home, 30), {
             agentId: input?.agentId,
             label: input?.label,
             capabilities: Array.isArray(input?.capabilities) ? input.capabilities : [],
@@ -3476,6 +3552,8 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         await conversationsReady
         const community = await resolveCommunity()
         const declarations = await loadDeclarations(ctx, join, workspace)
+        const principalMigration = await planPrincipalMigration(ctx, join, workspace, principalStoreRoot)
+        const availablePrincipals = loadPrincipalRegistry(join, principalStoreRoot).principals
         const identity = await (async () => {
           try {
             const id = await getIdentity()
@@ -3509,6 +3587,8 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           // declared it; `localAgents` above counts what the runtime is doing,
           // which is a different question.
           principal: declarations.principal,
+          principalMigration,
+          availablePrincipals,
           declaredAgents: declarations.agents.map((a) => ({
             agentId: a.agentId,
             label: a.label,

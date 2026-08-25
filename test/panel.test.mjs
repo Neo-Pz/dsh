@@ -169,6 +169,14 @@ describe('the panel answers this machine only', () => {
     }
   })
 
+  it('keeps Principal, My Agents and Workspace state private to this node', async () => {
+    const response = await host.call('/iflow/panel/state', {
+      method: 'GET',
+      remoteAddress: '192.168.1.42',
+    })
+    assert.equal(response.status, 403)
+  })
+
   it('accepts loopback, including the IPv4-mapped form', async () => {
     for (const address of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const response = await host.call('/iflow/panel/state', { remoteAddress: address })
@@ -201,6 +209,9 @@ describe('the panel answers this machine only', () => {
       ['/iflow/panel/conversations/reject', 'POST'],
       ['/iflow/panel/network', 'GET'],
       ['/iflow/panel/peers/probe', 'POST'],
+      ['/iflow/panel/principal/migration/plan', 'POST'],
+      ['/iflow/panel/principal/migration/execute', 'POST'],
+      ['/iflow/panel/principal/bind', 'POST'],
     ]
     for (const [path, method] of writes) {
       const refused = await host.call(path, { method, remoteAddress: '192.168.1.42', body: {} })
