@@ -46,6 +46,12 @@ export const STYLES = `
 .ifp-btn.primary { background: #2f6df6; border-color: #2f6df6; color: #fff; }
 .ifp-btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: #2f6df6; }
 .ifp-btn.danger { color: #b3261e; }
+.ifp-input {
+  min-width: 180px; padding: 8px 11px; font-size: 13px;
+  border: 1px solid var(--dsw-alias-border-l1, #e3e6ea); border-radius: 8px;
+  background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, inherit);
+}
+.ifp-input:focus { outline: 2px solid #2f6df6; outline-offset: 1px; }
 
 .ifp-consent { border-color: #2f6df6; }
 .ifp-consent h3 { margin-bottom: 12px; }

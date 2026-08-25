@@ -144,6 +144,13 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.declareAgent(body))
     }, { write: true })],
 
+    // The browser shows a short code; the operator confirms it on the Node
+    // that holds the Principal Authority. Community never receives that key.
+    ['/iflow/panel/web-login/confirm', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.confirmWebLogin(body.userCode))
+    }, { write: true })],
+
     // The Requests inbox: what is waiting on the person at this machine, and
     // the two answers they can give. Accepting is what creates a session and
     // lets a remote agent's message reach a model, so it is a write and takes

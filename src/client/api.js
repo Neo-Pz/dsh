@@ -47,6 +47,8 @@ export const api = {
   principalMigrationPlan: () => call('/iflow/panel/principal/migration/plan', { method: 'POST' }),
   migratePrincipal: (input) => call('/iflow/panel/principal/migration/execute', { method: 'POST', body: input }),
   declareAgent: (input) => call('/iflow/panel/agents/declare', { method: 'POST', body: input }),
+  confirmWebLogin: (userCode) =>
+    call('/iflow/panel/web-login/confirm', { method: 'POST', body: { userCode } }),
 
   // Conversations: the inbox, and the two answers a person can give it.
   conversations: () => call('/iflow/panel/conversations'),
