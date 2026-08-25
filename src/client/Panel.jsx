@@ -102,6 +102,8 @@ export function IFlowPanel({ state, onChanged }) {
   const [stage, setStage] = React.useState('idle') // idle | consent | claiming
   const [claim, setClaim] = React.useState(null)
   const [busy, setBusy] = React.useState(false)
+  const [webLoginCode, setWebLoginCode] = React.useState('')
+  const [webLoginResult, setWebLoginResult] = React.useState(null)
 
   const refresh = React.useCallback(async () => {
     if (onChanged) await onChanged()
@@ -229,6 +231,44 @@ export function IFlowPanel({ state, onChanged }) {
           })
         }
       />
+
+      <Card title="iFlowOne Web 登录" tone={webLoginResult ? 'on' : undefined}>
+        <p>
+          在 iFlowOne Web 发起登录后，把网页显示的短码填在这里。这个节点会用当前稳定 Principal
+          的 Authority 确认登录，并只提交本机可代表的 Agent；私钥不会离开本机。
+        </p>
+        <div className="ifp-actions">
+          <input
+            className="ifp-input ifp-mono"
+            value={webLoginCode}
+            onChange={(event) => setWebLoginCode(event.target.value.toUpperCase())}
+            placeholder="ABCD-2345"
+            maxLength={16}
+            autoComplete="off"
+          />
+          <button
+            className="ifp-btn primary"
+            disabled={busy || webLoginCode.trim().length < 8 || !state.principal}
+            onClick={() =>
+              act(async () => {
+                const result = await api.confirmWebLogin(webLoginCode.trim())
+                if (!result.ok) throw new Error(result.error ?? 'Web 登录确认失败')
+                setWebLoginResult(result)
+                setWebLoginCode('')
+              })
+            }
+          >
+            确认网页登录
+          </button>
+        </div>
+        {!state.principal ? <p className="ifp-muted">请先声明或绑定一个稳定 Principal。</p> : null}
+        {webLoginResult ? (
+          <p className="ifp-muted">已确认；返回 iFlowOne Web，网页会自动完成登录。</p>
+        ) : null}
+        {state.webIntents?.queued ? (
+          <p className="ifp-muted">本地有 {state.webIntents.queued} 条 Intent 正在等待 Agent 可用或网络恢复。</p>
+        ) : null}
+      </Card>
 
       <Card
         title="节点密钥"

@@ -169,6 +169,57 @@ describe('the payload wrapper', () => {
   })
 })
 
+describe('a multi-Agent Node opens with the addressed identity', () => {
+  it('selects the home belonging to to_did instead of the Node default', async () => {
+    const files = new Map()
+    const calls = []
+    const transport = createRelayTransport({
+      async iflowId(args, home, timeout) {
+        calls.push({ args, home, timeout })
+        files.set(args[2], Buffer.from(packRelayPayload('{"ok":true}', null)))
+      },
+      scratchPath: (name) => name,
+      async readBytes(path) { return files.get(path) },
+      async writeBytes(path, bytes) { files.set(path, Buffer.from(bytes)) },
+      async identityHome(did) { return did === 'did:key:zAgentB' ? '/keys/agent-b' : undefined },
+      async post() {},
+      async get() {},
+    })
+    const opened = await transport.open({
+      id: 'msg-agent',
+      to_did: 'did:key:zAgentB',
+      from_did: 'did:key:zAgentA',
+      conversation_id: 'conv-agent',
+      sealed: Buffer.from('opaque').toString('base64url'),
+    })
+    assert.equal(opened.body, '{"ok":true}')
+    assert.equal(calls[0].home, '/keys/agent-b')
+    assert.equal(calls[0].timeout, 20)
+  })
+
+  it('refuses an addressed DID for which this Node holds no key', async () => {
+    const transport = createRelayTransport({
+      async iflowId() { throw new Error('must not run') },
+      scratchPath: (name) => name,
+      async readBytes() { return Buffer.alloc(0) },
+      async writeBytes() {},
+      async identityHome() { return undefined },
+      async post() {},
+      async get() {},
+    })
+    await assert.rejects(
+      () => transport.open({
+        id: 'msg-other',
+        to_did: 'did:key:zOther',
+        from_did: 'did:key:zAgentA',
+        conversation_id: 'conv-other',
+        sealed: Buffer.from('opaque').toString('base64url'),
+      }),
+      /no private key/,
+    )
+  })
+})
+
 describe('when to use the relay at all', () => {
   const peer = { did: 'did:key:zB' }
 

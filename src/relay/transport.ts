@@ -25,7 +25,7 @@ import { envelopeAad, packRelayPayload, unpackRelayPayload } from './envelope.ts
  * @param io.logger       console-like
  */
 export function createRelayTransport(io) {
-  const { iflowId, scratchPath, readBytes, writeBytes, post, get, logger = console } = io
+  const { iflowId, scratchPath, readBytes, writeBytes, post, get, identityHome, logger = console } = io
 
   /** Seal a signed request for one recipient, bound to its routing metadata. */
   async function seal({ toDid, body, signature, conversationId, messageId, fromDid }) {
@@ -57,7 +57,12 @@ export function createRelayTransport(io) {
       fromDid: envelope.from_did,
       toDid: envelope.to_did,
     })
-    await iflowId(['open', sealedPath, plainPath, aad], 20)
+    // A Node can advertise several Agent DIDs. The ciphertext must be opened
+    // with the exact recipient key, never whichever key happens to be the
+    // Node default. Older callers omit identityHome and keep the one-key path.
+    const home = identityHome ? await identityHome(envelope.to_did) : undefined
+    if (identityHome && !home) throw new Error(`this node has no private key for relay recipient ${envelope.to_did}`)
+    await iflowId(['open', sealedPath, plainPath, aad], home ?? 20, home ? 20 : undefined)
     return unpackRelayPayload(Buffer.from(await readBytes(plainPath)).toString('utf8'))
   }
 

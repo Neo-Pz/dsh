@@ -1,6 +1,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { canonicalBytes } from 'iflow-protocol'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
 import { clearCommunitySettings, loadCommunitySettings, saveCommunitySettings } from './edge/community-config.js'
@@ -8,6 +10,7 @@ import { installPanelRoutes } from './edge/panel.js'
 import {
   agentDidsOf,
   agentHome,
+  authorityHome,
   bindPrincipal as bindPrincipalIdentity,
   declareAgent as declareAgentIdentity,
   declarePrincipal as declarePrincipalIdentity,
@@ -22,6 +25,12 @@ import { PinMismatchError, didFingerprint, looksLikeDid, reconcileDid } from './
 import { helpAdvertises, missingCapabilities, staleBinaryAdvice } from './identity/capabilities.js'
 import { relayDecision } from './relay/envelope.js'
 import { createRelayTransport, startRelayPolling } from './relay/transport.js'
+import {
+  IntentEnvelopeError,
+  LocalIntentQueue,
+  startLocalIntentPolling,
+} from './web/local-intents.js'
+import { normalizeWebLoginCode, ownedAgentBindings, webChallengeSigningPayload } from './web/auth.js'
 import { normalizeAction, validCapabilityId } from './a2a/capability.js'
 import {
   TERMINAL_TASK_STATES,
@@ -475,7 +484,15 @@ export default {
       async writeBytes(path, bytes) { writeFileSync(path, bytes) },
       async post(url, payload, token) { return curlPost(url, payload, 30, token) },
       async get(url, token) { return JSON.parse(await curlGet(url, 30, token)) },
+      async identityHome(did) {
+        const declarations = await loadDeclarations(ctx, join, workspace)
+        return homeForSigning(join, workspace, declarations, { did }, state.nodeDid, principalStoreRoot)
+      },
     })
+    // Installed after identity/community state is ready. Reply handling above
+    // closes over this reference so a Web-originated conversation can return a
+    // private Browser View without creating a second response path.
+    let webIntentQueue = null
 
     /**
      * The relay this node uses, or null.
@@ -502,7 +519,7 @@ export default {
      * verification on it. Nothing about arriving via the relay makes a message
      * more trusted, or differently trusted.
      */
-    async function sendViaRelay({ peer, toDid, prompt, conversationId, messageId }) {
+    async function sendViaRelay({ peer, toDid, prompt, conversationId, messageId, fromAgent }) {
       const settings = relaySettings()
       if (!settings) return { ok: false, error: 'no relay configured' }
       // Said here rather than letting `iflow-id seal` fail with "unknown
@@ -517,6 +534,7 @@ export default {
         }
       }
 
+      const fromDid = fromAgent?.did ?? state.nodeDid
       const request = {
         jsonrpc: '2.0',
         id: uid('req'),
@@ -530,12 +548,12 @@ export default {
           },
           configuration: { returnImmediately: true, historyLength: 0 },
           metadata: {
-            from: state.alias,
+            from: fromAgent?.agentId ?? state.alias,
             machine: await getMachineName(),
             conversationId,
             messageId,
-            actorType: 'human',
-            origin: 'keyboard',
+            actorType: fromAgent ? 'agent' : 'human',
+            origin: fromAgent ? 'web_intent' : 'keyboard',
             principalId: state.principalId ?? undefined,
             // So the recipient can tell how this arrived. It changes nothing
             // about verification; it is for the operator reading a thread.
@@ -549,11 +567,14 @@ export default {
       // the far side's digest check lines up without a special case.
       let signature = null
       try {
-        const id = await getIdentity()
+        const id = fromAgent ? { did: fromAgent.did } : await getIdentity()
         if (id.did) {
           const bodyPath = scratchPath('relay-sign.json')
           await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
-          signature = JSON.parse(await iflowId(['sign-file', 'POST', '/a2a', bodyPath], 20))
+          const signingHome = fromAgent ? agentHome(join, workspace, fromAgent.agentId) : undefined
+          signature = JSON.parse(
+            await iflowId(['sign-file', 'POST', '/a2a', bodyPath], signingHome ?? 20, signingHome ? 20 : undefined),
+          )
         }
       } catch (err) {
         // Signing is best-effort here exactly as it is on the direct path: an
@@ -567,7 +588,7 @@ export default {
         signature,
         conversationId,
         messageId,
-        fromDid: state.nodeDid,
+        fromDid,
       })
       const answer = await relay.send({
         url: settings.url,
@@ -576,7 +597,7 @@ export default {
         sealed,
         messageId,
         conversationId,
-        fromDid: state.nodeDid,
+        fromDid,
       })
       if (answer && answer.state === 'queued') {
         const conversation = state.conversations[conversationId]
@@ -688,8 +709,24 @@ export default {
         actorType: 'agent',
         origin: 'a2a',
       })
-      console.log(`iFlow relay: answer on ${conversationId ?? 'a conversation'} from ${peer ?? 'a peer'}:
+      let deliveredToBrowser = false
+      if (webIntentQueue && conversationId) {
+        try {
+          deliveredToBrowser = await webIntentQueue.deliverReply(conversationId, text, envelope.from_did ?? peer ?? 'unknown')
+        } catch (error) {
+          // Never attach reply text to an error/log. The local conversation
+          // remains the recoverable source; Community is not a transcript.
+          console.error(
+            `iFlow Web Intent: could not deliver private reply for ${conversationId} (${error?.message ?? error})`,
+          )
+        }
+      }
+      if (deliveredToBrowser) {
+        console.log(`iFlow relay: private answer delivered for ${conversationId}`)
+      } else {
+        console.log(`iFlow relay: answer on ${conversationId ?? 'a conversation'} from ${peer ?? 'a peer'}:
 ${text}`)
+      }
     }
 
     /**
@@ -3379,6 +3416,102 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
     })()
     ctx.effect(() => () => { if (edgeHandle) edgeHandle.dispose() })
 
+    // ── Human -> Own Agent: durable local half of the Web Intent plane ─────
+    const webIntentFile = join(workspace, '.iflow', 'web-intents.json')
+    const webIntentStore = {
+      async read() {
+        try {
+          return JSON.parse(await ctx.fs.readText(await ctx.fs.resolve(webIntentFile)))
+        } catch (error) {
+          if (error?.code === 'ENOENT' || /not found|no such file/i.test(String(error?.message ?? error))) return undefined
+          throw error
+        }
+      },
+      async write(value) {
+        await ctx.fs.writeText(await ctx.fs.resolve(webIntentFile), JSON.stringify(value, null, 2))
+      },
+    }
+
+    webIntentQueue = new LocalIntentQueue({
+      store: webIntentStore,
+      clock: () => new Date(),
+      async isAgentAvailable(did) {
+        const declarations = await loadDeclarations(ctx, join, workspace)
+        // A declared Agent is the local authority boundary P0 can act through.
+        // Missing means unavailable, so the ciphertext remains in Local Queue.
+        return declarations.agents.some((agent) => agent.did === did)
+      },
+      crypto: {
+        async open(did, sealed, aad) {
+          const declarations = await loadDeclarations(ctx, join, workspace)
+          const agent = declarations.agents.find((candidate) => candidate.did === did)
+          if (!agent) throw new IntentEnvelopeError('selected Agent is not declared on this Node', 'agent_unavailable')
+          const sealedPath = scratchPath(`web-intent-${Date.now()}.bin`)
+          const plainPath = scratchPath(`web-intent-${Date.now()}.json`)
+          writeFileSync(sealedPath, Buffer.from(sealed, 'base64url'))
+          try {
+            await iflowId(['open', sealedPath, plainPath, aad], agentHome(join, workspace, agent.agentId), 20)
+            return readFileSync(plainPath, 'utf8')
+          } catch {
+            throw new IntentEnvelopeError('Intent was not sealed for the selected Agent or its routing was altered')
+          } finally {
+            try { unlinkSync(sealedPath) } catch { /* already absent */ }
+            try { unlinkSync(plainPath) } catch { /* open failed before output */ }
+          }
+        },
+        async seal(recipientDid, plaintext, aad) {
+          const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+          const plainPath = scratchPath(`browser-view-${stamp}.json`)
+          const sealedPath = scratchPath(`browser-view-${stamp}.bin`)
+          writeFileSync(plainPath, plaintext)
+          try {
+            await iflowId(['seal', recipientDid, plainPath, sealedPath, aad], 20)
+            return Buffer.from(readFileSync(sealedPath)).toString('base64url')
+          } finally {
+            try { unlinkSync(plainPath) } catch { /* already absent */ }
+            try { unlinkSync(sealedPath) } catch { /* seal failed before output */ }
+          }
+        },
+        async keyId(publicKey) {
+          return createHash('sha256').update(publicKey, 'utf8').digest('hex')
+        },
+      },
+      async sendConversation(message) {
+        const declarations = await loadDeclarations(ctx, join, workspace)
+        const fromAgent = declarations.agents.find((agent) => agent.did === message.fromAgentDid)
+        if (!fromAgent) return { ok: false, error: 'selected Agent is no longer declared on this Node' }
+        return sendViaRelay({
+          peer: message.toAgentDid,
+          toDid: message.toAgentDid,
+          prompt: message.text,
+          conversationId: message.conversationId,
+          messageId: message.messageId,
+          fromAgent,
+        })
+      },
+      async postView(view) {
+        const settings = relaySettings()
+        if (!settings) throw new Error('Community connection is unavailable')
+        await curlPost(`${settings.url}/v1/edge/browser-views`, view, 30, settings.token)
+      },
+      logger: console,
+    })
+
+    const localIntentPolling = startLocalIntentPolling({
+      queue: webIntentQueue,
+      settings: relaySettings,
+      async inbox({ url, token }) {
+        const answer = JSON.parse(await curlGet(`${url}/v1/edge/intents?limit=25`, 30, token))
+        return Array.isArray(answer?.intents) ? answer.intents : []
+      },
+      async ack({ url, token }, intentIds) {
+        return curlPost(`${url}/v1/edge/intents/ack`, { intentIds }, 30, token)
+      },
+      intervalMs: Number(config.webIntentIntervalMs) || 15_000,
+      logger: console,
+    })
+    ctx.effect(() => localIntentPolling.dispose)
+
     // Collect anything left for this node, and say it is here.
     //
     // Started unconditionally and does nothing until `relaySettings()` answers,
@@ -3420,6 +3553,65 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       const base = await communityBaseUrl()
       const out = await curlRaw('POST', `${base}${path}`, body, 30, null)
       return JSON.parse(out)
+    }
+
+    async function confirmWebLogin(userCode) {
+      const code = normalizeWebLoginCode(userCode)
+      if (!code) {
+        return { ok: false, error: '请输入 iFlowOne Web 显示的 8 位短码' }
+      }
+      const community = await resolveCommunity()
+      if (!community?.url || !community?.token) return { ok: false, error: '这个节点尚未连接 Community' }
+      const declarations = await loadDeclarations(ctx, join, workspace)
+      const principal = declarations.principal
+      if (!principal || principal.legacy || !principal.principalId) {
+        return { ok: false, error: '请先声明、绑定或迁移一个稳定 Principal' }
+      }
+      if (!edgeHandle?.nodeId) return { ok: false, error: 'iFlow Edge 尚未就绪' }
+
+      try {
+        const base = community.url.replace(/\/+$/, '')
+        const challenge = JSON.parse(
+          await curlGet(
+            `${base}/v1/edge/auth/challenges?userCode=${encodeURIComponent(code)}`,
+            30,
+            community.token,
+          ),
+        )
+        const agentBindings = ownedAgentBindings(declarations, principal.principalId)
+        const payload = webChallengeSigningPayload({
+          challenge,
+          nodeId: edgeHandle.nodeId,
+          principal,
+          agentBindings,
+        })
+        const signPath = scratchPath(`web-login-${challenge.challengeId}.bin`)
+        writeFileSync(signPath, Buffer.from(canonicalBytes(payload)))
+        const signed = JSON.parse(
+          await iflowId(
+            ['sign-blob', signPath],
+            authorityHome(join, principalStoreRoot, principal.principalId, principal.authorityVersion),
+            20,
+          ),
+        )
+        const result = await curlPost(
+          `${base}/v1/edge/auth/challenges/${encodeURIComponent(challenge.challengeId)}/confirm`,
+          {
+            principal: {
+              principalId: principal.principalId,
+              authorityDid: principal.authorityDid,
+              authorityVersion: principal.authorityVersion,
+            },
+            agentBindings,
+            signature: { alg: 'EdDSA', signerDid: principal.authorityDid, value: signed.signature },
+          },
+          30,
+          community.token,
+        )
+        return { ok: result?.state === 'confirmed', ...result }
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error) }
+      }
     }
 
     installPanelRoutes(ctx, webServer, {
@@ -3548,6 +3740,8 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         }
       },
 
+      confirmWebLogin,
+
       async state() {
         await conversationsReady
         const community = await resolveCommunity()
@@ -3568,6 +3762,14 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           ? { nodeId: edge.nodeId, lastSeq: edge.edge.journal.lastSeq, syncedSeq: edge.edge.journal.syncedSeq }
           : null
         const localAgents = edge ? (edge.edge.views.agents().data.agents ?? []).length : 0
+        const localIntentStates = await webIntentQueue.status()
+        const webIntents = localIntentStates.reduce(
+          (counts, intent) => {
+            counts[intent.state] = (counts[intent.state] ?? 0) + 1
+            return counts
+          },
+          {},
+        )
 
         return {
           edgeReady: Boolean(edge),
@@ -3579,6 +3781,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           localAgents,
           journal,
           pendingFacts: journal ? Math.max(0, journal.lastSeq - journal.syncedSeq) : 0,
+          webIntents,
           publishing: community
             ? { url: community.url, visibility: community.visibility, enabledAt: community.enabledAt ?? null }
             : null,

@@ -76,6 +76,12 @@ another.
   token exists (`config.token`, or `iflow_set_token` at runtime): the one write route never serves
   unauthenticated, however the port is bound. A repeated delivery never executes twice, and nothing
   on it can grant a permission DSH would deny.
+- **iFlowOne Web as an Agent remote control** — a browser login is confirmed in the local panel by
+  the stable Principal Authority. Community returns only privately authorized `My Agents`. Human
+  text arrives as an `EncryptedIntentEnvelope` sealed to the selected Agent; this Node persists it
+  before ACK, applies a message-only policy, signs the resulting Agent-to-Agent request with that
+  Agent's key, and seals status/reply views to the current browser key. Community never receives
+  plaintext, and `<workspace>/.iflow/web-intents.json` never stores decrypted text.
 
 ## Install
 
@@ -194,6 +200,8 @@ The A2A method/enum/field names follow the [A2A protocol](https://github.com/a2a
   changes.
 - `src/identity/keyring.ts` — stable Principal registry, Workspace binding, versioned Authority and
   Agent key routing, plus the explicit legacy migration transaction.
+- `src/web/` — Node-confirmed browser login payloads and the durable Local Intent Queue. It owns the
+  `Human Intent → policy → Agent message` authority transition and browser-view re-encryption.
 - `src/runtime/dsh-ports.ts` — DSH implementations of the iFlow `RuntimePorts` (storage, subprocess,
   HTTP, clock, logger, ids).
 - `src/runtime/dsh-instrumentation.ts` — the only place that maps DSH lifecycle events to iFlow
@@ -224,7 +232,7 @@ Developing does:
 ```sh
 npm install
 node scripts/build.mjs   # bundles the iFlow core packages into lib/index.js
-npm test                 # 41 tests, run against that bundle and the real iflow-id
+npm test                 # full suite, including real iflow-id round trips
 ```
 
 The suite covers the architecture's five failure tests against a real on-disk journal, origin
