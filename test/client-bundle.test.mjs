@@ -18,6 +18,25 @@ const MANIFEST = join(import.meta.dirname, '..', 'package.json')
 const bundle = readFileSync(CLIENT, 'utf8')
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
 
+/**
+ * Does this text reach the browser?
+ *
+ * esbuild escapes every non-ASCII character to `\uXXXX`, so searching the
+ * bundle for a Chinese string finds nothing however present it is. Compared
+ * case-insensitively because which case esbuild writes those hex digits in is
+ * its business, not this test's.
+ */
+const BACKSLASH = String.fromCharCode(92)
+function bundleHas(text) {
+  const escaped = [...text]
+    .map((character) => {
+      const code = character.charCodeAt(0)
+      return code > 127 ? `${BACKSLASH}u${code.toString(16).padStart(4, '0')}` : character
+    })
+    .join('')
+  return bundle.toLowerCase().includes(escaped.toLowerCase())
+}
+
 describe('the client bundle DSH loads', () => {
   it('registers itself the way the module loader expects', () => {
     assert.match(bundle, /window\.__ModuleLoader__\.load\(/)
@@ -71,6 +90,38 @@ describe('the client bundle DSH loads', () => {
     assert.equal(manifest.exports['./client'], './lib/client.js')
     assert.equal(manifest.dsh.client.platform, 'web')
     assert.ok(manifest.files.includes('lib'))
+  })
+
+  it('ships both answers to a held conversation', () => {
+    // The acceptance gate is only worth having if a person can answer it
+    // without typing a tool call. Same narrow claim as the identity check
+    // below: both routes reached the browser, so the inbox is not calling an
+    // endpoint that was never wired.
+    assert.match(bundle, /conversations\/accept/)
+    assert.match(bundle, /conversations\/reject/)
+  })
+
+  it('is a control plane, not just a publish gate', () => {
+    // The five tabs of the local Hub. A tab that vanishes in a refactor takes
+    // its whole surface with it silently, and the publish gate in particular
+    // must not get lost on its way into "Me".
+    //
+    // Searched as escapes, not as text: esbuild writes non-ASCII as \uXXXX, so
+    // looking for the characters themselves would quietly never match and this
+    // assertion would pass for the wrong reason.
+    for (const label of ['待处理', 'Agents', '网络', '交易', '我']) {
+      assert.ok(bundleHas(label), `the ${label} tab must reach the browser`)
+    }
+  })
+
+  it('ships both halves of the two-layer identity', () => {
+    // Declaring an Agent before a Principal exists is refused by the panel's
+    // own code and again by the keyring, which is where that rule is tested.
+    // What a bundle assertion can honestly establish is narrower: both routes
+    // reached the browser at all, so the UI is not calling an endpoint that was
+    // never wired.
+    assert.match(bundle, /principal\/declare/)
+    assert.match(bundle, /agents\/declare/)
   })
 
   it('is reachable from the app, not only from Settings', () => {

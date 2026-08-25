@@ -5,6 +5,8 @@
 //!   show [--json]     print the public identity (never the secret)
 //!   sign-blob <file>  detached Ed25519 signature over a file's exact bytes
 //!   verify-blob <file> <signature> <did>   verify such a signature
+//!   seal <recipient-did> <plaintext-file> <out-file> [aad]  seal for a peer
+//!   open <sealed-file> <out-file> [aad]    open an envelope sealed to this node
 //!   sign <method> <path> <body>   build a signed request envelope
 //!   verify <json>     verify a signed request envelope
 //!   agentcard-sign <card.json>    sign an AgentCard (JWS)
@@ -21,6 +23,7 @@
 //!   usage report [--from DID] [--model M]    aggregate usage + cost report
 
 mod agentcard;
+mod envelope;
 mod grant;
 mod identity;
 mod nonce;
@@ -37,24 +40,53 @@ use grant::{Capability, GrantSpec, Level, RevokeVerdict, RootAck, RootStrength};
 use identity::did_key::DidKey;
 use identity::store::{self, STORAGE_PLAINTEXT_DEV, StoredIdentity};
 
+/// Where node-wide state lives: `IFLOW_NODE_HOME`, falling back to the identity
+/// home so a single-identity install is unaffected.
+pub fn node_home() -> String {
+    std::env::var("IFLOW_NODE_HOME")
+        .or_else(|_| std::env::var("IFLOW_HOME"))
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
-    // --home <dir> overrides the identity-store location (IFLOW_HOME) so a
-    // sandboxed runtime (e.g. the DSH plugin) can keep ~/.iflow inside its
-    // own workspace root. Set as an env var so every module picks it up.
+    // --home <dir> overrides the IDENTITY-store location (IFLOW_HOME) so a
+    // sandboxed runtime (e.g. the DSH plugin) can keep ~/.iflow inside its own
+    // workspace root. Set as an env var so every module picks it up.
+    //
+    // --node-home <dir> overrides where NODE-WIDE state lives (IFLOW_NODE_HOME):
+    // the revocation registry and the pricing table. These two are not
+    // properties of a key.
+    //
+    // The distinction exists because one machine now holds several identities —
+    // a principal plus one key per declared agent, each in its own home. If the
+    // revocation registry followed the identity, a grant revoked while acting as
+    // one agent would still be honoured while acting as another, on the same
+    // machine, which is not a revocation at all. `--node-home` defaults to
+    // `--home`, so a single-identity install behaves exactly as before.
     let mut home: Option<String> = None;
+    let mut node_home: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--home" && i + 1 < args.len() {
             home = Some(args[i + 1].clone());
             args.remove(i);
             args.remove(i);
+        } else if args[i] == "--node-home" && i + 1 < args.len() {
+            node_home = Some(args[i + 1].clone());
+            args.remove(i);
+            args.remove(i);
         } else {
             i += 1;
         }
     }
-    if let Some(h) = home {
+    if let Some(h) = home.clone() {
         std::env::set_var("IFLOW_HOME", h);
+    }
+    if let Some(n) = node_home.or(home) {
+        std::env::set_var("IFLOW_NODE_HOME", n);
     }
     if args.len() < 2 {
         print_usage();
@@ -65,6 +97,8 @@ fn main() {
         "show" => cmd_show(&args[2..]),
         "sign-blob" => cmd_sign_blob(&args[2..]),
         "verify-blob" => cmd_verify_blob(&args[2..]),
+        "seal" => cmd_seal(&args[2..]),
+        "open" => cmd_open(&args[2..]),
         "sign" => cmd_sign(&args[2..]),
         "sign-file" => cmd_sign_file(&args[2..]),
         "verify" => cmd_verify(&args[2..]),
@@ -93,9 +127,13 @@ fn print_usage() {
         "iflow-id — iFlow trust root (P1 + P2)\n\
          \n\
          usage:\n\
-         \x20 iflow-id [--home <dir>] <command> [args...]\n\
+         \x20 iflow-id [--home <dir>] [--node-home <dir>] <command> [args...]\n\
          \n\
-         \x20 --home <dir>   identity store location (default ~/.iflow)\n\
+         \x20 --home <dir>        identity store location (default ~/.iflow)\n\
+         \x20 --node-home <dir>   node-wide state: revocations, pricing.\n\
+         \x20                     Defaults to --home. Set it when one machine\n\
+         \x20                     holds several identities, so a revocation\n\
+         \x20                     cannot be sidestepped by signing as another.\n\
          \n\
          commands:\n\
          \x20 create [label]          generate & persist did:key identity\n\
@@ -105,6 +143,12 @@ fn print_usage() {
          \x20 sign-file <method> <path> <body-file>\n\
          \x20                              sign a request envelope, body read from file\n\
          \x20 verify <envelope.json>   verify a request envelope\n\
+         \x20 seal <recipient-did> <plaintext-file> <out-file> [aad]\n\
+         \x20                              seal a message so only that peer can read it.\n\
+         \x20                              [aad] binds it to its routing metadata, so a\n\
+         \x20                              relay cannot redeliver it as another message.\n\
+         \x20 open <sealed-file> <out-file> [aad]\n\
+         \x20                              open an envelope sealed to this identity\n\
          \x20 agentcard-sign <card.json>\n\
          \x20                              sign an AgentCard (JWS JSON out)\n\
          \x20 agentcard-verify <signed.json>\n\
@@ -238,6 +282,57 @@ fn cmd_verify_blob(args: &[String]) -> Result<(), String> {
 
     DidKey(did.clone()).verify(&bytes, &sig)?;
     let out = serde_json::json!({ "ok": true, "signerDid": did });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Seal a message so only `recipient` can read it.
+///
+/// Everything travels as files rather than argv: a message body easily exceeds
+/// the Windows command-line limit, and the same reasoning already governs
+/// `sign-file`. The `aad` is small and routing-only, so it stays an argument.
+fn cmd_seal(args: &[String]) -> Result<(), String> {
+    let (did, plaintext_file, out_file, aad) = match args {
+        [d, p, o] => (d.clone(), p.clone(), o.clone(), String::new()),
+        [d, p, o, a] => (d.clone(), p.clone(), o.clone(), a.clone()),
+        _ => return Err("usage: iflow-id seal <recipient-did> <plaintext-file> <out-file> [aad]".into()),
+    };
+    let plaintext =
+        std::fs::read(&plaintext_file).map_err(|e| format!("cannot read {plaintext_file}: {e}"))?;
+    let sealed = envelope::seal(&DidKey(did.clone()), &plaintext, aad.as_bytes())?;
+    std::fs::write(&out_file, &sealed).map_err(|e| format!("cannot write {out_file}: {e}"))?;
+    let out = serde_json::json!({
+        "ok": true,
+        "recipientDid": did,
+        "bytes": sealed.len(),
+        "path": out_file,
+    });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Open an envelope sealed to this node's identity.
+///
+/// Exits non-zero when the envelope was not for this identity, was altered, or
+/// arrived under different routing metadata than it was sealed with — so a
+/// caller can branch on the exit code without parsing anything.
+fn cmd_open(args: &[String]) -> Result<(), String> {
+    let (sealed_file, out_file, aad) = match args {
+        [s, o] => (s.clone(), o.clone(), String::new()),
+        [s, o, a] => (s.clone(), o.clone(), a.clone()),
+        _ => return Err("usage: iflow-id open <sealed-file> <out-file> [aad]".into()),
+    };
+    let sealed = std::fs::read(&sealed_file).map_err(|e| format!("cannot read {sealed_file}: {e}"))?;
+    let identity = load_identity()?;
+    let signing = identity.signing_key()?;
+    let plaintext = envelope::open(&signing, &sealed, aad.as_bytes())?;
+    std::fs::write(&out_file, &plaintext).map_err(|e| format!("cannot write {out_file}: {e}"))?;
+    let out = serde_json::json!({
+        "ok": true,
+        "recipientDid": identity.did,
+        "bytes": plaintext.len(),
+        "path": out_file,
+    });
     println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
     Ok(())
 }
@@ -643,14 +738,12 @@ fn hex(bytes: &[u8]) -> String {
 
 // ── token usage metering (P4 / DESIGN §4.2) ────────────────────────────────
 
-/// Pricing table path: `<home>/.iflow/pricing.json` (same home resolution as
-/// the identity store). The plugin points `--home` at its workspace root.
+/// Pricing table path: `<node-home>/.iflow/pricing.json`.
+///
+/// Node-wide, not per-identity: a rate card describes what this machine's
+/// compute costs, which does not change because a different key is signing.
 fn pricing_path() -> std::path::PathBuf {
-    let home = std::env::var("IFLOW_HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".iflow").join("pricing.json")
+    std::path::PathBuf::from(node_home()).join(".iflow").join("pricing.json")
 }
 
 fn cmd_usage(args: &[String]) -> Result<(), String> {

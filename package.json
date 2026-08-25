@@ -1,7 +1,7 @@
 {
   "name": "iflow-dsh-plugin",
-  "version": "0.1.1",
-  "description": "iFlow A2A bridge for DeepSeek Harness (v20: P1 trust root + P2 delegation + P4 token metering).",
+  "version": "0.2.0",
+  "description": "iFlow A2A bridge for DeepSeek Harness (v21: conversations, acceptance gate, sealed relay, P1 trust root + P2 delegation + P4 token metering).",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -14,7 +14,6 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "prepare": "node scripts/fetch-iflow-id.mjs",
     "test": "node --test \"test/*.test.mjs\""
   },
   "dsh": {
@@ -49,9 +48,12 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.6",
-    "iflow-adapter-sdk": "^0.1.0",
-    "iflow-domain": "^0.1.0",
-    "iflow-protocol": "^0.1.0"
+    "iflow-adapter-sdk": "^0.3.0",
+    "iflow-domain": "^0.3.0",
+    "iflow-protocol": "^0.3.0",
+    "jsdom": "^30.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "exports": {
     ".": "./lib/index.js",

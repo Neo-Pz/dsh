@@ -12,14 +12,25 @@
 
 ---
 
-## 1. 技术路线（V17 → P1 → P2 → P3）
+## 1. 技术路线（V17 → P1 → P2 → V21 → P3）
 
 | 阶段 | 名称 | 内容 | 状态 |
 |---|---|---|---|
-| **V17** | A2A Transport | 直连互通 + mirror 镜像 + agentPreset 修复 + 更新源 | ✅ 已实现（A/B 两端跑通） |
+| **V17** | A2A Transport | 直连互通 + agentPreset 修复 + 更新源 | ✅ 已实现（A/B 两端跑通） |
 | **P1 / V18** | Trust Layer（信任根） | ed25519 身份 + AgentCard JWS + 请求签名 + nonce 防重放 | ✅ 已实现（Rust `iflow-id` 参考实现，11/11 测试通过） |
 | **P2 / V19** | Delegation Layer（委托） | 授权书（scope/预算/时长/可吊销）+ L0-L3 分级授权 + 授权标志 | ✅ 已实现（`iflow-id grant` 签发/验证/分级 + 入站 `X-IFlow-Grant` 检查，实测 L1 允许/L3 拒） |
+| **V21** | Conversation Layer（会话层） | Conversation ≠ Session + Accept 闸门 + 密封信封 + relay + Hub 面板 | ✅ 已实现（见 §11） |
 | **P3** | Economic Layer（经济） | x402 / AP2 / 支付宝 AI 支付对接 + 链上分账 + 声誉上链 | 🔜 |
+
+> V17 那一行原本写着「mirror 镜像」。`iflow-mirror` 已在 V21 退役——它是单一全局 session
+> 配单一全局对端，而且要往 DSH 私有的 session 格式里写，写完之后 DSH 自己的加载器又拒收：
+>
+> ```
+> invalid seed event at index 3: session event "assistant/message"
+> is surface-eligible and requires a surfaceOp marker
+> ```
+>
+> 它默认关闭地发布，然后就一直关着。远端对话现在跑在操作者本来就看得见的原生 DSH session 里。
 
 **关键结论**：
 - 信任根**绕不开**，直接做 P1，不做 API key 过渡（API key 是量变，key pair 才是质变）
@@ -230,19 +241,30 @@ ifo 社区（校验）：验 ua 签名（P1）→ 验授权书（P2）→ 通过
 ## 10. 路线图
 
 ```
-已实现：V17 A2A Transport（mirror + agentPreset 修复 + 更新源 + 双向互通）
+已实现：V17 A2A Transport（agentPreset 修复 + 更新源 + 双向互通）
         │
-        ├── V18 信任根（P1）：Rust `iflow-id` 参考实现 ✅（ed25519 did:key + AgentCard JWS
-        │       + 请求签名 + nonce 防重放，8/8 测试过；插件集成 M2/M3 进行中）
+        ├── V18 信任根（P1）✅ ed25519 did:key + AgentCard JWS + 请求签名 + nonce 防重放
+        ├── V19 委托（P2）  ✅ 授权书 L0–L3 + 入站 X-IFlow-Grant + 吊销 check-at-use
+        ├── P4 计量        ✅ 任务级 token/成本（幂等、去重、按模型定价）
+        │
+        └── V21 会话层 ✅
+              ├── Conversation ≠ Session：conversationId ≡ A2A contextId，
+              │     两端各自绑一个原生 DSH session，谁也不知道对方的 session id
+              ├── Accept 闸门：陌生 Agent 首条消息 park 成 AUTH_REQUIRED，
+              │     一个 token 都不烧；受理与工具授权是两个独立安全层
+              ├── 密封信封：X25519 + ChaCha20-Poly1305，aad 绑定路由元数据
+              ├── relay：点对点转发，投递即删除、只留回执，RELAY_ENABLED 默认关
+              ├── DID 钉住：TOFU + 变更大声拒绝（经 relay 的首次接触仍可被 MITM）
+              └── Hub 面板：Agents / Network / Requests / Transactions / Me
         │
 近期（技术落地）：
-  ├── V18 M2/M3：插件内 AgentCard JWS 路由 + 插件↔Rust 子进程 + `remote-a2a` 权限预设
-  ├── token 任务级计量（agent-loop usage 聚合 → 成本报告）
-  └── 离线信箱 v0（失败重试 + 本地暂存 + 上线补发）
+  ├── P4 离线队列剩余三态（accepted / rejected / expired）——需要 relay 回传
+  ├── iFlowOne web：Discover / AgentCard 上的 Chat 输入框 / My Agents / queued intent
+  └── 收紧发布边界：一个 owner 内部的 subagent 活动属于私有运行时数据，不该进网络
         │
 中期（协议完善）：
-  ├── P2 授权书 + 授权标志 + L0-L3 分级
   ├── 交付校验钩子（eval 套件化）
+  ├── UsageReceipt + L0–L3 可信等级（自报 / runtime 计量 / provider 可核 / 可证明）
   └── 分账演示（if-dsk ↔ if-lt：付费任务 + 自动分成）
         │
 远期（生态）：
@@ -253,7 +275,63 @@ ifo 社区（校验）：验 ua 签名（P1）→ 验授权书（P2）→ 通过
 
 ---
 
-## 11. 核心原则清单（一页速记）
+## 11. 会话层（V21）
+
+在这一层之前，一条 A2A 消息进来就 mint 一个 taskId、起一个用完即弃的 session。于是三件事
+同时不成立：消息之间没有连续性、没有人被问过要不要跟对方说话、也没有办法联系一台拨不通的机器。
+
+### 11.1 Conversation ≠ Session
+
+这是整层的分界线：
+
+```
+Conversation   网络关系里的通信线程     属于 iFlow 协议层
+Session        Runtime 内部的执行容器   属于各自 Runtime
+```
+
+`conversationId` **就是** A2A 的 `contextId`——协议在 Message 和 Task 上本来就有这个字段，
+所以不认识会话层的老 peer 不带它、本地 mint 一个、完全不会被打断。不发明并行 header。
+
+两端各自把它绑到自己的一个原生 DSH session（`agents.resume`），**谁也不会知道对方的
+session id**。本地 session 被删不会终结 Conversation：下一条消息静默绑一个新的。
+
+绑定关系存在 `<workspace>/.iflow/conversations.json`，**刻意不在 `.iflow/edge/` 下面**——
+那是同步面。这是结构性保证，不是需要人记住的纪律。
+
+### 11.2 受理与授权是两个问题
+
+`remote-a2a` 受限预设回答的是「一个已受理的任务**能做什么**」。在 V21 之前，没有任何东西
+回答「这个陌生人凭什么让这台机器**做任何事**」。
+
+首次联系现在会被 park 成 `TASK_STATE_AUTH_REQUIRED`——非终态，所以发送方现有的 `GetTask`
+轮询会原样等下去，有人受理后自然走到 COMPLETED，**对端零改动**。默认 `ask`。
+
+### 11.3 密封信封
+
+relay 搬运的是不透明 blob：匿名 sealed box（X25519 + HKDF-SHA256 + ChaCha20-Poly1305），
+每条消息一对临时密钥，aad 绑定 `conversationId|messageId|fromDid|toDid`。
+
+被密封的是**完整的已签名 A2A 请求**，所以收件端跑的验证和直连完全一样——
+**没有 relay 专用的信任路径，因为那会是绕过 P1/P2 的后门**。
+
+### 11.4 relay 做不到的事
+
+| 做不到 | 靠什么 |
+|---|---|
+| 读消息 | 服务端没有能打开它的密钥，任何路径都不 parse `sealed` |
+| 改投递目标 | aad 绑定，换 conversation / messageId / 收件人就解不开 |
+| 留住消息 | ack 时 `sealed = ''`，只剩投递回执 |
+| 冒充 Agent | `did → node` 先到先得，第二个节点认领同一 DID 直接 409 |
+
+### 11.5 密钥分发的那一瞬间
+
+对端 DID 首次见到即钉住，之后不一致直接拒绝。**诚实的边界：经 relay 的首次接触，relay
+能 MITM；之后不能。** 钉住买到的是「窗口精确地只有每个对端一瞬间，之后的攻击必须打破一个
+钉子，那是响亮的」。带外核对用 `iflow_add_peer --did`。
+
+---
+
+## 12. 核心原则清单（一页速记）
 
 1. **信任根绕不开**：先 P1，后经济
 2. **签名防伪造，nonce 防重放**，缺一不可

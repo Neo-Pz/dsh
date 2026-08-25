@@ -12,10 +12,14 @@
  */
 
 /**
- * @param run    invoke iflow-id with args, returning stdout (throws on non-zero)
+ * @param run    invoke iflow-id with args, returning stdout (throws on non-zero).
+ *               Takes an optional key directory: this node holds one key per
+ *               declared Agent, so which key signs is part of the request.
  * @param writeScratch  persist bytes and return the path the binary should read
+ * @param resolveHome   which key directory a signing context belongs to, or
+ *                      undefined when this node holds no such key
  */
-export function createIflowIdSigner({ run, writeScratch, logger }) {
+export function createIflowIdSigner({ run, writeScratch, logger, resolveHome }) {
   let cachedDid
 
   return {
@@ -26,11 +30,38 @@ export function createIflowIdSigner({ run, writeScratch, logger }) {
       return cachedDid
     },
 
-    async sign(bytes) {
+    /**
+     * Sign as whoever the context names.
+     *
+     * With no context, or a context this node has no key for, the behaviour
+     * differs sharply and on purpose:
+     *
+     *   no context        the node's own key — the single-identity case, and
+     *                     every caller that predates declared Agents
+     *   known identity    that identity's key
+     *   unknown identity  REFUSE
+     *
+     * The refusal is the point. Substituting another key would attribute the
+     * event to an Agent whose operator never signed it; the journal treats a
+     * signing failure as "record it unsigned", and an unprovable fact is a far
+     * better answer than a falsely attributed one.
+     */
+    async sign(bytes, context) {
+      const named = context && (context.did || context.agentId)
+      let home
+      if (named && resolveHome) {
+        home = resolveHome(context)
+        if (!home) {
+          throw new Error(
+            `no key on this node for ${context.did ?? context.agentId}; refusing to sign as another identity`,
+          )
+        }
+      }
+
       const path = await writeScratch('signable.bin', bytes)
-      const out = await run(['sign-blob', path])
+      const out = await run(['sign-blob', path], home)
       const parsed = JSON.parse(out)
-      if (!cachedDid) cachedDid = parsed.signerDid
+      if (!home && !cachedDid) cachedDid = parsed.signerDid
       return base64urlDecode(parsed.signature)
     },
   }

@@ -169,6 +169,14 @@ describe('the panel answers this machine only', () => {
     }
   })
 
+  it('keeps Principal, My Agents and Workspace state private to this node', async () => {
+    const response = await host.call('/iflow/panel/state', {
+      method: 'GET',
+      remoteAddress: '192.168.1.42',
+    })
+    assert.equal(response.status, 403)
+  })
+
   it('accepts loopback, including the IPv4-mapped form', async () => {
     for (const address of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const response = await host.call('/iflow/panel/state', { remoteAddress: address })
@@ -189,6 +197,61 @@ describe('the panel answers this machine only', () => {
   it('answers 405 rather than acting on the wrong method', async () => {
     const response = await host.call('/iflow/panel/publish/stop', { method: 'GET' })
     assert.equal(response.status, 405)
+  })
+
+  it('guards the conversation and network routes like every other one', async () => {
+    // Accepting a conversation is what creates a session and lets a remote
+    // agent's message reach a model, so it is at least as consequential as
+    // publishing — and the relationship graph is nobody else's business either.
+    const writes = [
+      ['/iflow/panel/conversations', 'GET'],
+      ['/iflow/panel/conversations/accept', 'POST'],
+      ['/iflow/panel/conversations/reject', 'POST'],
+      ['/iflow/panel/network', 'GET'],
+      ['/iflow/panel/peers/probe', 'POST'],
+      ['/iflow/panel/principal/migration/plan', 'POST'],
+      ['/iflow/panel/principal/migration/execute', 'POST'],
+      ['/iflow/panel/principal/bind', 'POST'],
+    ]
+    for (const [path, method] of writes) {
+      const refused = await host.call(path, { method, remoteAddress: '192.168.1.42', body: {} })
+      assert.equal(refused.status, 403, `${path} must refuse the network`)
+      const served = await host.call(path, { method, remoteAddress: '127.0.0.1', body: {} })
+      assert.equal(served.status, 200, `${path} must answer loopback`)
+    }
+  })
+})
+
+describe('the relationship graph the Hub draws', () => {
+  let workspace
+  let host
+
+  before(async () => {
+    workspace = mkdtempSync(join(tmpdir(), 'iflow-panel-map-'))
+    host = createStubContext(workspace)
+    const plugin = (await import(pathToFileURL(BUNDLE).href)).default
+    plugin.apply(host.ctx, {})
+    await waitFor(() => host.routes.has('/iflow/panel/network'), 'the network route to mount')
+    await waitFor(() => host.routes.has('/iflow/edge/status'), 'the edge to mount')
+  })
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('carries agents and relationships, and nothing about work in progress', async () => {
+    // `views.network()` also holds task, goal and room nodes. They are filtered
+    // out on this side rather than in the browser for two reasons: the star map
+    // is about who knows whom, not what anyone is busy with — and whatever is
+    // not sent cannot leak from the page that receives it.
+    const response = await host.call('/iflow/panel/network', { remoteAddress: '127.0.0.1' })
+    assert.equal(response.status, 200)
+    for (const node of response.json.nodes) {
+      assert.equal(node.kind, 'agent', `${node.kind} node must not reach the star map`)
+    }
+    for (const edge of response.json.edges) {
+      assert.ok(edge.id.startsWith('rel:'), `${edge.id} is derived from work, not from a relationship`)
+    }
   })
 })
 

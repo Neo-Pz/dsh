@@ -91,7 +91,9 @@ export function installPanelRoutes(ctx, webServer, deps) {
   const routes = [
     ['/iflow/panel/state', 'GET', guard(async (_request, response) => {
       send(response, 200, await deps.state())
-    }, { write: false })],
+    // Despite being a read, this contains Workspace path, Principal binding,
+    // My Agents and migration state. It is a private control-plane view.
+    }, { write: true })],
 
     ['/iflow/panel/claim/start', 'POST', guard(async (_request, response) => {
       send(response, 200, await deps.claimStart())
@@ -113,6 +115,69 @@ export function installPanelRoutes(ctx, webServer, deps) {
 
     ['/iflow/panel/identity/fetch', 'POST', guard(async (_request, response) => {
       send(response, 200, await deps.fetchIdentity())
+    }, { write: true })],
+
+    ['/iflow/panel/principal/declare', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.declarePrincipal(body.label))
+    }, { write: true })],
+
+    ['/iflow/panel/principal/bind', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.bindPrincipal(body.principalId))
+    }, { write: true })],
+
+    // This is deliberately a POST even though it only plans: the response
+    // reveals private identity bindings and legacy key state. It therefore
+    // takes the same local-machine guard as the operation it previews.
+    ['/iflow/panel/principal/migration/plan', 'POST', guard(async (_request, response) => {
+      send(response, 200, await deps.principalMigrationPlan())
+    }, { write: true })],
+
+    ['/iflow/panel/principal/migration/execute', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.migratePrincipal(body))
+    }, { write: true })],
+
+    ['/iflow/panel/agents/declare', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.declareAgent(body))
+    }, { write: true })],
+
+    // The Requests inbox: what is waiting on the person at this machine, and
+    // the two answers they can give. Accepting is what creates a session and
+    // lets a remote agent's message reach a model, so it is a write and takes
+    // the loopback guard like every other one.
+    //
+    // Read is local-only too, unlike the projections: the list carries the
+    // message excerpt and the bound local session id, neither of which appears
+    // in `/iflow/projection/requests` precisely because that one is shareable.
+    ['/iflow/panel/conversations', 'GET', guard(async (_request, response) => {
+      send(response, 200, await deps.listConversations())
+    }, { write: true })],
+
+    ['/iflow/panel/conversations/accept', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.acceptConversation(body.conversationId))
+    }, { write: true })],
+
+    ['/iflow/panel/conversations/reject', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.rejectConversation(body.conversationId, body.reason))
+    }, { write: true })],
+
+    // The relationship graph the Hub's Network tab draws. Guarded like the rest
+    // of the panel rather than served as a projection: who this machine has
+    // talked to is not the same kind of fact as what it published, and the
+    // panel has exactly one access rule.
+    ['/iflow/panel/network', 'GET', guard(async (_request, response) => {
+      send(response, 200, await deps.networkMap())
+    }, { write: true })],
+
+    // Reachability on demand. Kept off the polled `/state` payload on purpose:
+    // probing every peer on a 15-second timer is a scheduled port-scan.
+    ['/iflow/panel/peers/probe', 'POST', guard(async (_request, response) => {
+      send(response, 200, await deps.probePeers())
     }, { write: true })],
   ]
 

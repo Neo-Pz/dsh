@@ -10,6 +10,7 @@
 | `deepseek-harness\.local\plugins\iflow-dev` | `dev` 最新提交的 detached worktree | 否 |
 | `deepseek-harness\.local\plugins\iflow` | 已确认 tag 的 detached worktree | 否 |
 | `deepseek-harness\.iflow` | 身份、撤销记录和计价状态 | 仅由运行时写入 |
+| `%USERPROFILE%\.iflowone`（或 `IFLOWONE_HOME`） | 稳定 Principal Registry 与版本化 Authority 密钥 | 仅由身份流程写入 |
 | `F:\i_Flow_One\iflowone` | iFlow 核心包源码（已发布到 npm，构建不再需要它） | 是，但那是另一个仓库 |
 
 `.local/` 和 `.iflow/` 由 `deepseek-harness/.git/info/exclude` 排除，不进入公共 Harness 仓库的状态或历史。
@@ -32,7 +33,7 @@
 cd F:\i_Flow_One\iflow-dsh-plugin
 npm install                    # 首次，或依赖变动后
 node scripts\build.mjs
-npm test                       # 41 个测试，直接跑构建产物与真实 iflow-id
+npm test                       # 直接跑构建产物、迁移场景与真实 iflow-id
 ```
 
 测试分四组：`pure-helpers`（纯函数，含手写 SHA-256 与 node:crypto 对表）、
@@ -130,7 +131,7 @@ cargo build --release --manifest-path F:\i_Flow_One\deepseek-harness\.local\plug
 
 - 每次运行只选择 `iflow.patch.yml` 或 `iflow-dev.patch.yml` 之一。两个 patch 都注册 `id: iflow`，双载会重复注册工具。
 - `iflow_pull` 仅在开发 patch 启用，并写入 detached 开发 worktree。把它产生的 diff 审阅并迁回源仓后再提交；不要把它当作发布机制。
-- 插件源码从自己的 worktree 读取，身份状态仍写入 Harness 工作区的 `.iflow/`。不要删除 `.iflow/`，也不要恢复 Harness 根目录的 `iflow-plugin.js` 或 `iflow-id.exe` 副本。
+- 插件源码从自己的 worktree 读取。Node/Agent/Runtime 状态写入 Harness 工作区的 `.iflow/`；稳定 Principal Authority 写入用户级 `.iflowone/`。不要删除任一目录，也不要恢复 Harness 根目录的 `iflow-plugin.js` 或 `iflow-id.exe` 副本。旧 `.iflow/principal/` 只能经面板的显式 dry-run、确认与备份流程迁移，禁止手工合并不同 DID。
 - Loader 的模块名必须是绝对 `file://` URL，并且必须指向 `lib/index.js`（见上文“构建”）。本机的两个实际 URL 位于 `.local/patches/`；源仓中的 `cordis.patch.example.yml` 仅是模板。
 - 入站 A2A 现在**默认失败关闭**：找不到受限的 `remote-a2a` preset 时直接拒绝任务，而不是退回 `standard`（那等于把完整本地工具集交给远端 peer）。要恢复旧行为需显式写 `config.allowUnrestrictedInbound: true`，或用 `config.inboundPreset` 指向另一个受限 preset。
 - **事件在原点签名。** 每条 journal 事件带一条 Ed25519 detached 签名，覆盖

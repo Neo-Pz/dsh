@@ -22,6 +22,7 @@ function Dot({ tone }) {
 
 export function IFlowLauncher({ wide, onOpen }) {
   const [publishing, setPublishing] = React.useState(null)
+  const [pending, setPending] = React.useState(0)
   const [reachable, setReachable] = React.useState(true)
 
   React.useEffect(() => {
@@ -31,6 +32,9 @@ export function IFlowLauncher({ wide, onOpen }) {
         const state = await api.state()
         if (cancelled) return
         setPublishing(state.publishing)
+        // Free: this read was already happening for the publish status, so
+        // showing that somebody is waiting costs no extra request.
+        setPending(state.conversationsPending ?? 0)
         setReachable(true)
       } catch {
         // The edge starts asynchronously and can be a moment behind the UI.
@@ -46,18 +50,35 @@ export function IFlowLauncher({ wide, onOpen }) {
     }
   }, [])
 
-  const tone = !reachable ? 'off' : publishing ? 'on' : 'warn'
-  const label = !reachable ? 'iFlow' : publishing ? 'iFlow 已上线' : 'iFlow 未上线'
+  // Something waiting on a person outranks everything else this button could
+  // say. Publishing state is a standing fact you can read whenever; a held
+  // conversation is a remote Agent blocked until someone here answers.
+  const waiting = reachable && pending > 0
+  const tone = !reachable ? 'off' : waiting ? 'warn' : publishing ? 'on' : 'warn'
+  const label = !reachable
+    ? 'iFlow'
+    : waiting
+      ? `iFlow · ${pending} 条待处理`
+      : publishing
+        ? 'iFlow 已上线'
+        : 'iFlow 未上线'
+  const title = waiting
+    ? `${pending} 个 Agent 在等你答复`
+    : publishing
+      ? `正在向 ${publishing.url} 发布事实`
+      : '这台机器的事实还没有离开过本机'
 
   return (
     <button
       type="button"
       className={`ifp-launcher${wide ? '' : ' narrow'}`}
       onClick={onOpen}
-      title={publishing ? `正在向 ${publishing.url} 发布事实` : '这台机器的事实还没有离开过本机'}
+      title={title}
     >
       <Dot tone={tone} />
       {wide === false ? null : <span className="ifp-launcher-label">{label}</span>}
+      {/* Narrow rail: the label is hidden, so the count is the only signal. */}
+      {waiting && wide === false ? <span className="ifp-badge">{pending}</span> : null}
     </button>
   )
 }

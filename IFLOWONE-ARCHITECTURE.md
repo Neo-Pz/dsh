@@ -285,7 +285,7 @@ The plugin changes:
 
 | Current capability | Target treatment |
 | --- | --- |
-| Global `iflow-mirror` and `mirrorPeer` | Legacy read-only history; no new product behavior |
+| ~~Global `iflow-mirror` and `mirrorPeer`~~ | **Retired in V21.** One global session and one global peer could not represent many point-to-point conversations, and writing into DSH's private session format produced a file DSH's own loader rejected. A remote conversation now binds to an ordinary DSH session by `conversationId`. |
 | `peers.json` | Community directory cache, not canonical registry |
 | `mailbox.json` | General signed event outbox backed by an Origin Journal and cursor synchronization |
 | In-memory task map | Local execution-handle registry only; iFlow projectors own collaborative Task projections |
@@ -328,7 +328,8 @@ P0 proof-of-concept freeze
 
 ### P0: freeze the proof of concept
 
-- Do not add product features to `iflow-mirror`.
+- Do not add product features to `iflow-mirror`. (Done differently in the end: it was removed
+  rather than frozen. A second chat surface had no way to become right.)
 - Keep existing P1, P2, A2A, and task execution paths working.
 - Restrict source self-update to development workflows.
 - Publish the product boundary and architecture decisions.
