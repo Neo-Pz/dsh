@@ -60,6 +60,9 @@ function deriveNodeId(workspace) {
  *                           the outbox is flushed to that Community. Absent by
  *                           default: installing this plugin publishes nothing.
  * @param options.agentDids    DID of each declared Agent, by id
+ * @param options.publicAgents Agents the operator explicitly declared for
+ *                           publication. Runtime/session Agents are observed
+ *                           locally and never belong in this list.
  * @param options.resolveSigningHome  which key directory a signing context
  *                           belongs to; undefined means this node holds no
  *                           such key and the event must go unsigned
@@ -142,6 +145,24 @@ export async function installIFlowEdge(ctx, options) {
       allowedOrigins: options.allowedOrigins,
     },
   })
+
+  // A declared Agent is the durable network actor. DSH session Agents are
+  // runtime execution instances and remain local through the observer's
+  // default visibility. Publish each declaration once, under the Agent's own
+  // DID, so Discover never has to infer public actors from local activity.
+  for (const agent of options.publicAgents ?? []) {
+    const alreadyRegistered = edge.journal
+      .all()
+      .some((event) => event.type === 'agent.registered' && event.subject.id === agent.agentId)
+    if (alreadyRegistered) continue
+    await edge.observer.agentRegistered({
+      agentId: agent.agentId,
+      label: agent.label,
+      capabilities: agent.capabilities,
+      did: agent.did,
+      context: { visibility: 'public' },
+    })
+  }
 
   const instrumentation = installDshInstrumentation(ctx, edge, {
     capabilities: descriptor.capabilities,
