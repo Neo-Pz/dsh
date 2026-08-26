@@ -778,7 +778,6 @@ ${text}`)
     /** Which Agents this node can be reached about. */
     function relayRoster() {
       const roster = []
-      if (state.nodeDid) roster.push({ did: state.nodeDid, label: state.alias, state: 'online' })
       for (const [agentId, did] of Object.entries(state.declaredAgentDids ?? {})) {
         if (did) roster.push({ did, label: agentId, state: 'online' })
       }
@@ -3363,6 +3362,12 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         // with. Read once per edge start: declaring an Agent restarts the edge,
         // so this cannot go stale behind the journal's back.
         agentDids: agentDidsOf(declarations),
+        publicAgents: declarations.agents.map((agent) => ({
+          agentId: agent.agentId,
+          label: agent.label || agent.agentId,
+          did: agent.did,
+          capabilities: Array.isArray(agent.capabilities) ? agent.capabilities : [],
+        })),
         resolveSigningHome: (context) =>
           homeForSigning(join, workspace, declarations, context, identity.did, principalStoreRoot),
         writeScratch: async (name, bytes) => {

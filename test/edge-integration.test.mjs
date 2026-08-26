@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -568,5 +568,58 @@ describe('iFlow edge inside a stub DSH host', () => {
         // best effort
       }
     }
+  })
+})
+
+describe('declared public Agent registration', () => {
+  let workspace
+  let host
+
+  before(async () => {
+    workspace = mkdtempSync(join(tmpdir(), 'iflow-declared-agent-'))
+    mkdirSync(join(workspace, '.iflow'), { recursive: true })
+    writeFileSync(
+      join(workspace, '.iflow', 'agents.json'),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        agents: [{
+          agentId: 'Gen-On-A',
+          label: 'GenOnA',
+          did: 'did:key:z6Mkf6A6tcTvj8Cbke4EzVAwR7qg2xwXPViG2kGHAL4uCinE',
+          capabilities: ['iflow.cap:a2a.receive'],
+        }],
+      })}\n`,
+    )
+    host = createStubContext(workspace)
+    const bundle = pathToFileURL(join(import.meta.dirname, '..', 'lib', 'index.js')).href
+    const plugin = (await import(`${bundle}?declared-agent=${Date.now()}`)).default
+    plugin.apply(host.ctx, {})
+    await waitFor(
+      () => {
+        const journal = join(workspace, '.iflow', 'edge', 'origin.ndjson')
+        return existsSync(journal) && readOriginJournal(workspace).some((event) => event.subject.id === 'Gen-On-A')
+      },
+      'the declared Agent to be journaled',
+    )
+  })
+
+  after(() => {
+    for (const dispose of host.disposers) {
+      try {
+        dispose()
+      } catch {
+        // Teardown is best-effort in a stub host.
+      }
+    }
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  it('publishes only the explicitly declared Agent as a durable network actor', () => {
+    const event = readOriginJournal(workspace).find((candidate) => candidate.subject.id === 'Gen-On-A')
+    assert.equal(event.type, 'agent.registered')
+    assert.equal(event.visibility, 'public')
+    assert.equal(event.issuer.did, 'did:key:z6Mkf6A6tcTvj8Cbke4EzVAwR7qg2xwXPViG2kGHAL4uCinE')
+    assert.equal(event.payload.label, 'GenOnA')
+    assert.deepEqual(event.payload.capabilities, ['iflow.cap:a2a.receive'])
   })
 })
