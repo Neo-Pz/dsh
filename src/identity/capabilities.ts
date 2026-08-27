@@ -15,6 +15,7 @@
 
 /** What this plugin needs, and what stops working without each one. */
 export const IFI_CAPABILITIES = Object.freeze({
+  '--node-home': 'keep revocations and pricing node-wide across Agent identities',
   seal: 'sealing messages for the relay',
   open: 'opening messages from the relay',
 })

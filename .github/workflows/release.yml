@@ -97,8 +97,9 @@ jobs:
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           HOME_DIR="$(mktemp -d)"
-          "$BIN" --home "$HOME_DIR" create ci-smoke-test
-          OUT="$("$BIN" --home "$HOME_DIR" show --json)"
+          NODE_HOME_DIR="$(mktemp -d)"
+          "$BIN" --home "$HOME_DIR" --node-home "$NODE_HOME_DIR" create ci-smoke-test
+          OUT="$("$BIN" --home "$HOME_DIR" --node-home "$NODE_HOME_DIR" show --json)"
           echo "$OUT"
           node -e '
             const parsed = JSON.parse(process.argv[1])
