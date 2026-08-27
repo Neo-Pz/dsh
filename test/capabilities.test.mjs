@@ -84,19 +84,26 @@ describe('reading a binary’s help', () => {
 
 describe('what is missing', () => {
   it('names every capability an old binary lacks', () => {
-    assert.deepEqual(missingCapabilities(OLD_HELP).sort(), ['open', 'seal'])
+    assert.deepEqual(missingCapabilities(OLD_HELP).sort(), ['--node-home', 'open', 'seal'])
   })
 
   it('names none when they are all there', () => {
-    const help = '  seal <recipient-did> <file> <out> [aad]\n  open <sealed> <out> [aad]\n'
+    const help = [
+      '  --node-home <dir>',
+      '  seal <recipient-did> <file> <out> [aad]',
+      '  open <sealed> <out> [aad]',
+      '',
+    ].join('\n')
     assert.deepEqual(missingCapabilities(help), [])
   })
 
   it('describes each one in terms of what stops working', () => {
     for (const [command, description] of Object.entries(IFI_CAPABILITIES)) {
       assert.ok(description.length > 0, `${command} has no description`)
-      assert.match(description, /relay/, `${command} should say what it is for`)
     }
+    assert.match(IFI_CAPABILITIES['--node-home'], /node-wide/)
+    assert.match(IFI_CAPABILITIES.seal, /relay/)
+    assert.match(IFI_CAPABILITIES.open, /relay/)
   })
 })
 
