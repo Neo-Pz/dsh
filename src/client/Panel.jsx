@@ -97,7 +97,71 @@ function Claim({ claim, onCancel }) {
   )
 }
 
-export function IFlowPanel({ state, onChanged }) {
+/**
+ * The session directory is a local operator decision, not an Agent fact.
+ * DSH's picker is preferred because it validates on the host; direct entry is
+ * retained for headless/older DSH installations where that optional UI service
+ * is unavailable.  Saving never moves old sessions: each existing
+ * ConversationBinding keeps its original cwd.
+ */
+function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, onPick }) {
+  const [editing, setEditing] = React.useState(false)
+  const [path, setPath] = React.useState(value ?? defaultValue ?? '')
+  const [error, setError] = React.useState(null)
+  const current = value ?? defaultValue ?? '—'
+
+  React.useEffect(() => { setPath(value ?? defaultValue ?? '') }, [value, defaultValue])
+
+  const save = async (next) => {
+    setError(null)
+    try {
+      await onSave(next)
+      setEditing(false)
+    } catch (cause) {
+      setError(cause?.message ?? '工作目录保存失败，请重试。')
+    }
+  }
+
+  const choose = async () => {
+    if (!onPick) return
+    setError(null)
+    try {
+      const picked = await onPick()
+      if (picked) await save(picked)
+    } catch (cause) {
+      setError(cause?.message ?? '无法打开目录选择器；可以直接输入绝对路径。')
+    }
+  }
+
+  return (
+    <Card title={confirmed ? '会话工作目录' : '先确认会话工作目录'} tone={confirmed ? 'on' : 'warn'}>
+      {!confirmed ? (
+        <p>
+          iFlow 会在这个文件夹下创建后续 Agent 对话的普通 DSH Session。默认是当前 DSH 工作区；确认前不会新建会话。
+        </p>
+      ) : (
+        <p className="ifp-muted">新对话会写入这里；已有对话仍留在它们原来的文件夹，不会被移动或删除。</p>
+      )}
+      <p className="ifp-mono ifp-wrap">{current}</p>
+      {editing ? (
+        <div className="ifp-actions">
+          <input className="ifp-input ifp-mono" value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\path\\to\\workspace" autoComplete="off" />
+          <button className="ifp-btn primary" disabled={busy || !path.trim()} onClick={() => save(path.trim())}>保存</button>
+          <button className="ifp-btn" disabled={busy} onClick={() => setEditing(false)}>取消</button>
+        </div>
+      ) : (
+        <div className="ifp-actions">
+          {!confirmed ? <button className="ifp-btn primary" disabled={busy} onClick={() => save(defaultValue)}>使用默认工作区</button> : null}
+          {onPick ? <button className="ifp-btn" disabled={busy} onClick={choose}>选择文件夹</button> : null}
+          <button className="ifp-btn" disabled={busy} onClick={() => setEditing(true)}>{confirmed ? '修改路径' : '输入路径'}</button>
+        </div>
+      )}
+      {error ? <p className="ifp-error">{error}</p> : null}
+    </Card>
+  )
+}
+
+export function IFlowPanel({ state, onChanged, pickWorkspace }) {
   const [error, setError] = React.useState(null)
   const [stage, setStage] = React.useState('idle') // idle | consent | claiming
   const [claim, setClaim] = React.useState(null)
@@ -168,6 +232,7 @@ export function IFlowPanel({ state, onChanged }) {
 
   const publishing = state.publishing
   const identityReady = state.identity && state.identity.ready
+  const conversationWorkspace = state.conversationWorkspace ?? {}
 
   return (
     <>
@@ -187,6 +252,18 @@ export function IFlowPanel({ state, onChanged }) {
           </div>
         </div>
       </Card>
+
+      <ConversationWorkspace
+        value={conversationWorkspace.path}
+        defaultValue={conversationWorkspace.defaultPath ?? state.workspaceRoot}
+        confirmed={conversationWorkspace.confirmed === true}
+        busy={busy}
+        onPick={pickWorkspace}
+        onSave={(path) => act(async () => {
+          const result = await api.setConversationWorkspace(path)
+          if (!result.ok) throw new Error(result.error ?? '工作目录保存失败')
+        })}
+      />
 
       <Card title="本地发现" tone="on">
         <div className="ifp-row">

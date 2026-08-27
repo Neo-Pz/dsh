@@ -207,6 +207,7 @@ describe('the panel answers this machine only', () => {
       ['/iflow/panel/conversations', 'GET'],
       ['/iflow/panel/conversations/accept', 'POST'],
       ['/iflow/panel/conversations/reject', 'POST'],
+      ['/iflow/panel/conversation-workspace', 'POST'],
       ['/iflow/panel/network', 'GET'],
       ['/iflow/panel/peers/probe', 'POST'],
       ['/iflow/panel/principal/migration/plan', 'POST'],
@@ -219,6 +220,24 @@ describe('the panel answers this machine only', () => {
       const served = await host.call(path, { method, remoteAddress: '127.0.0.1', body: {} })
       assert.equal(served.status, 200, `${path} must answer loopback`)
     }
+  })
+
+  it('requires an explicit local confirmation before using the default conversation folder', async () => {
+    const before = await host.call('/iflow/panel/state')
+    assert.equal(before.status, 200)
+    assert.equal(before.json.conversationWorkspace.confirmed, false)
+    assert.equal(before.json.conversationWorkspace.path, workspace)
+
+    const confirmed = await host.call('/iflow/panel/conversation-workspace', {
+      method: 'POST',
+      body: { path: workspace },
+    })
+    assert.equal(confirmed.status, 200)
+    assert.deepEqual(confirmed.json, { ok: true, path: workspace })
+
+    const after = await host.call('/iflow/panel/state')
+    assert.equal(after.json.conversationWorkspace.confirmed, true)
+    assert.equal(after.json.conversationWorkspace.path, workspace)
   })
 })
 

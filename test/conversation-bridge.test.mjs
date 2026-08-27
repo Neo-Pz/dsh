@@ -210,7 +210,10 @@ async function boot({ trust, resumeFails = false } = {}) {
   }
   const host = createHost(workspace, { resumeFails })
   const plugin = (await import(BUNDLE)).default
-  plugin.apply(host.ctx, {})
+  // Most bridge scenarios model a node whose operator already chose its
+  // session folder. Fresh interactive installs exercise that confirmation in
+  // panel.test.mjs; these tests exercise delivery after the choice.
+  plugin.apply(host.ctx, { conversationWorkspace: workspace })
   await waitFor(() => host.routes.has('/a2a'), 'the A2A route to mount')
   // The edge comes up asynchronously and the A2A bridge deliberately does not
   // wait for it — journaling must never gate answering a peer. Tests that

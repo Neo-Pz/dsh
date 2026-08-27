@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { canonicalBytes } from 'iflow-protocol'
 import { createHash } from 'node:crypto'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { installIFlowEdge } from './edge/install.js'
@@ -163,6 +163,56 @@ export default {
         nodeLabel: state.alias,
         updatedAt: iso(),
       }, null, 2))
+    }
+
+    // Node identity and the plugin's private journal remain anchored at the
+    // DSH workspace it was installed from.  Conversation sessions are a
+    // separate, operator-chosen concern: this avoids making a folder change
+    // accidentally mint a new Node identity or orphaning a Journal.
+    const conversationWorkspaceFile = join(workspace, '.iflow', 'conversation-workspace.json')
+    const conversationWorkspace = { path: workspace, confirmed: false }
+    const conversationWorkspaceReady = (async () => {
+      // A deployment config counts as an explicit operator decision.  It is
+      // useful for unattended installation, while fresh interactive installs
+      // still stop at the panel and ask before creating any conversation.
+      if (typeof config.conversationWorkspace === 'string' && config.conversationWorkspace.trim()) {
+        conversationWorkspace.path = config.conversationWorkspace.trim()
+        conversationWorkspace.confirmed = true
+        return
+      }
+      try {
+        const stored = JSON.parse(await ctx.fs.readText(await ctx.fs.resolve(conversationWorkspaceFile)))
+        if (typeof stored.path === 'string' && stored.path.trim()) {
+          conversationWorkspace.path = stored.path.trim()
+          conversationWorkspace.confirmed = stored.confirmed === true
+        }
+      } catch { /* first install: require an explicit panel decision */ }
+    })()
+
+    async function requireConversationWorkspace() {
+      await conversationWorkspaceReady
+      if (!conversationWorkspace.confirmed) {
+        throw new Error('请先在 iFlow 的“我”页面确认会话工作目录，再开始 Agent 对话')
+      }
+      return conversationWorkspace.path
+    }
+
+    async function setConversationWorkspace(path) {
+      if (typeof path !== 'string' || !path.trim()) throw new Error('请输入工作目录的绝对路径')
+      const candidate = path.trim()
+      if (!isAbsolute(candidate)) throw new Error('工作目录必须是绝对路径')
+      let stats
+      try { stats = statSync(candidate) } catch { throw new Error('工作目录不存在或无法访问') }
+      if (!stats.isDirectory()) throw new Error('工作目录必须指向一个文件夹')
+      conversationWorkspace.path = candidate
+      conversationWorkspace.confirmed = true
+      await ctx.fs.writeText(await ctx.fs.resolve(conversationWorkspaceFile), JSON.stringify({
+        schemaVersion: 1,
+        path: candidate,
+        confirmed: true,
+        updatedAt: iso(),
+      }, null, 2))
+      return { ok: true, path: candidate }
     }
 
     // Scratch files handed to the iflow-id binary (Windows argv has a length
@@ -1527,7 +1577,14 @@ ${text}`)
       // hide them in the child-agent surface instead of the selected
       // workspace's normal session list, which is the opposite of the chat
       // product: people must be able to find and reopen these threads.
-      const meta = { cwd: workspace, ...(presetId ? { agentPreset: presetId } : {}) }
+      let conversationCwd
+      try {
+        conversationCwd = await requireConversationWorkspace()
+      } catch (err) {
+        setStatus(taskId, 'TASK_STATE_AUTH_REQUIRED', err && err.message ? err.message : String(err))
+        return
+      }
+      const meta = { cwd: conversationCwd, ...(presetId ? { agentPreset: presetId } : {}) }
 
       let handle
       let resumed = false
@@ -1557,7 +1614,7 @@ ${text}`)
         if (conversation) {
           bindSession(conversation, {
             runtime: 'dsh',
-            workspaceId: workspace,
+            workspaceId: conversationCwd,
             localSessionId: handle.agent.session.id ?? childId,
             now: iso(),
           })
@@ -3595,18 +3652,19 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         catch { /* A Conversation outlives a locally deleted Session. */ }
       }
       if (!handle) {
+        const conversationCwd = await requireConversationWorkspace()
         const sessionId = `iflow-${uid('agent')}`
         handle = await agents.create({
           sessionId,
           // Keep the session in the normal DSH workspace conversation list.
           // The ConversationBinding carries the iFlow-specific identity; a
           // subagent origin is neither necessary nor correct here.
-          meta: { cwd: workspace },
+          meta: { cwd: conversationCwd },
           agentOptions,
           signal: controller.signal,
         })
         bindSession(conversation, {
-          runtime: 'dsh', workspaceId: workspace,
+          runtime: 'dsh', workspaceId: conversationCwd,
           localSessionId: handle.agent.session.id ?? sessionId, now: iso(),
         })
         created = true
@@ -4063,6 +4121,14 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       // token configured therefore means no remote access at all.
       authorizeRemote: (request) => state.token !== null && authorized(request),
 
+      async setConversationWorkspace(path) {
+        try {
+          return await setConversationWorkspace(path)
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        }
+      },
+
       async declarePrincipal(label) {
         try {
           const principal = await declarePrincipalIdentity(
@@ -4183,6 +4249,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
 
       async state() {
         await conversationsReady
+        await conversationWorkspaceReady
         const community = await resolveCommunity()
         const declarations = await loadDeclarations(ctx, join, workspace)
         const principalMigration = await planPrincipalMigration(ctx, join, workspace, principalStoreRoot)
@@ -4244,6 +4311,11 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           alias: state.alias,
           nodeId: edge ? edge.nodeId : null,
           workspaceRoot: workspace,
+          conversationWorkspace: {
+            path: conversationWorkspace.path,
+            confirmed: conversationWorkspace.confirmed,
+            defaultPath: workspace,
+          },
           // Cached reachability, deliberately NOT probed here. The Launcher
           // polls this route every 15 seconds; probing on that path would turn
           // the panel into a scheduled port-scan of every registered peer.
