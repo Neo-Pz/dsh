@@ -20,6 +20,7 @@ import {
 import { installDshInstrumentation } from '../runtime/dsh-instrumentation.js'
 import { createDshPorts } from '../runtime/dsh-ports.js'
 import { isLoopbackRequest } from './panel.js'
+import { hasPublishableAgentRegistration } from './public-registration.ts'
 import { startCommunitySync } from './sync.js'
 
 /**
@@ -151,10 +152,7 @@ export async function installIFlowEdge(ctx, options) {
   // default visibility. Publish each declaration once, under the Agent's own
   // DID, so Discover never has to infer public actors from local activity.
   for (const agent of options.publicAgents ?? []) {
-    const alreadyRegistered = edge.journal
-      .all()
-      .some((event) => event.type === 'agent.registered' && event.subject.id === agent.agentId)
-    if (alreadyRegistered) continue
+    if (hasPublishableAgentRegistration(edge.journal.all(), agent)) continue
     await edge.observer.agentRegistered({
       agentId: agent.agentId,
       label: agent.label,
