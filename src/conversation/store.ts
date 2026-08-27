@@ -142,8 +142,16 @@ export async function saveConversations(ctx, join, workspace, store) {
 function normalize(id, value) {
   return {
     conversationId: id,
+    localAgentId: typeof value.localAgentId === 'string' ? value.localAgentId : null,
+    localAgentAuthorityDid: typeof value.localAgentAuthorityDid === 'string' ? value.localAgentAuthorityDid : null,
+    peerAgentId: typeof value.peerAgentId === 'string' ? value.peerAgentId : (typeof value.peer === 'string' ? value.peer : null),
+    peerAgentAuthorityDid: typeof value.peerAgentAuthorityDid === 'string'
+      ? value.peerAgentAuthorityDid
+      : (typeof value.peerDid === 'string' ? value.peerDid : null),
     peer: typeof value.peer === 'string' ? value.peer : null,
     peerDid: typeof value.peerDid === 'string' ? value.peerDid : null,
+    mode: value.mode === 'assisted' ? 'assisted' : 'direct',
+    active: value.active !== false,
     state: typeof value.state === 'string' ? value.state : 'pending',
     binding: value.binding && typeof value.binding === 'object' ? value.binding : null,
     pendingTask: value.pendingTask ?? null,
@@ -152,6 +160,7 @@ function normalize(id, value) {
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
     seenMessageIds: Array.isArray(value.seenMessageIds) ? value.seenMessageIds.slice(-SEEN_LIMIT) : [],
     outbound: Array.isArray(value.outbound) ? value.outbound.slice(-OUTBOUND_LIMIT) : [],
+    drafts: Array.isArray(value.drafts) ? value.drafts.slice(-DRAFT_LIMIT) : [],
   }
 }
 
@@ -160,6 +169,8 @@ const SEEN_LIMIT = 200
 
 /** How many sent-message receipts a thread keeps. */
 const OUTBOUND_LIMIT = 50
+
+const DRAFT_LIMIT = 20
 
 /**
  * What is known about a message this node sent through the relay.
@@ -175,12 +186,29 @@ const OUTBOUND_LIMIT = 50
  */
 export const OUTBOUND_STATES = Object.freeze(['queued', 'delivered', 'accepted', 'rejected', 'expired', 'unknown'])
 
-export function newConversation(id, { peer, peerDid, state, preview, now }) {
+export function newConversation(id, {
+  peer,
+  peerDid,
+  localAgentId,
+  localAgentAuthorityDid,
+  peerAgentId,
+  peerAgentAuthorityDid,
+  mode,
+  state,
+  preview,
+  now,
+}) {
   const at = now ?? new Date().toISOString()
   return {
     conversationId: id,
+    localAgentId: localAgentId ?? null,
+    localAgentAuthorityDid: localAgentAuthorityDid ?? null,
+    peerAgentId: peerAgentId ?? peer ?? null,
+    peerAgentAuthorityDid: peerAgentAuthorityDid ?? peerDid ?? null,
     peer: peer ?? null,
     peerDid: peerDid ?? null,
+    mode: mode === 'assisted' ? 'assisted' : 'direct',
+    active: true,
     state: state ?? 'pending',
     binding: null,
     pendingTask: null,
@@ -192,7 +220,32 @@ export function newConversation(id, { peer, peerDid, state, preview, now }) {
     updatedAt: at,
     seenMessageIds: [],
     outbound: [],
+    drafts: [],
   }
+}
+
+/**
+ * A pair has an active pointer, not a permanent uniqueness constraint. An
+ * explicit new Conversation closes only the pointer and preserves history.
+ */
+export function findActiveConversation(conversations, localAgentId, peerAgentId) {
+  return Object.values(conversations).find((conversation) =>
+    conversation.active !== false &&
+    conversation.localAgentId === localAgentId &&
+    conversation.peerAgentId === peerAgentId &&
+    conversation.state !== 'closed' && conversation.state !== 'rejected',
+  )
+}
+
+export function activateConversation(conversations, conversation) {
+  for (const candidate of Object.values(conversations)) {
+    if (candidate.conversationId === conversation.conversationId) continue
+    if (candidate.localAgentId === conversation.localAgentId && candidate.peerAgentId === conversation.peerAgentId) {
+      candidate.active = false
+    }
+  }
+  conversation.active = true
+  return conversation
 }
 
 /**
@@ -223,6 +276,28 @@ export function bindSession(conversation, { runtime, workspaceId, localSessionId
   conversation.binding = { runtime, workspaceId, localSessionId }
   conversation.updatedAt = now ?? new Date().toISOString()
   return conversation.binding
+}
+
+export function putDraft(conversation, { draftId, text, originIntentId, expiresAt, now }) {
+  const at = now ?? new Date().toISOString()
+  conversation.drafts = (conversation.drafts ?? []).filter((draft) => draft.draftId !== draftId)
+  conversation.drafts.push({ draftId, text, originIntentId, state: 'pending', createdAt: at, expiresAt })
+  if (conversation.drafts.length > DRAFT_LIMIT) conversation.drafts.splice(0, conversation.drafts.length - DRAFT_LIMIT)
+  conversation.updatedAt = at
+  return conversation.drafts.at(-1)
+}
+
+export function decideDraft(conversation, draftId, decision, now) {
+  const draft = (conversation.drafts ?? []).find((candidate) => candidate.draftId === draftId)
+  if (!draft || draft.state !== 'pending') return null
+  if (draft.expiresAt && Date.parse(draft.expiresAt) <= Date.parse(now ?? new Date().toISOString())) {
+    draft.state = 'expired'
+    return null
+  }
+  draft.state = decision === 'confirm' ? 'confirmed' : 'cancelled'
+  draft.decidedAt = now ?? new Date().toISOString()
+  conversation.updatedAt = draft.decidedAt
+  return draft
 }
 
 /** Note that a message went out, so its fate can be asked about later. */

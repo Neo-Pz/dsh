@@ -1,17 +1,15 @@
 /**
  * Durable Human -> Own Agent Intent handling at the Origin Node.
- *
- * Community owns only a sealed delivery queue. The Node first persists an
- * envelope locally, then acknowledges collection, then asks the selected Agent
- * to decrypt and apply policy. A repeated Community delivery therefore cannot
- * repeat the Agent side effect.
+ * Community owns only sealed queues. Plaintext is opened by the selected
+ * Agent authority and private projections are sealed to a browser view key.
  */
-
 import { canonicalJson, validateEncryptedIntent } from 'iflow-protocol'
 
-const STORE_VERSION = 1
+const STORE_VERSION = 2
 const MAX_TEXT = 16 * 1024
-const VIEW_TTL_MS = 2 * 60 * 1000
+const DEFAULT_SYNC_LIMIT = 50
+const MAX_SYNC_LIMIT = 100
+const VIEW_TTL_MS = 10 * 60 * 1000
 
 export class IntentPolicyError extends Error {
   constructor(message, code = 'policy_denied') {
@@ -29,20 +27,29 @@ export class IntentEnvelopeError extends Error {
   }
 }
 
-/** Exact AAD shared by Browser and Agent. Community routing cannot be swapped. */
 export function intentAad(envelope) {
   return canonicalJson({ version: envelope.version, kind: envelope.kind, routing: envelope.routing })
 }
 
-/** Exact AAD shared by Agent and the one Browser View key. */
 export function browserViewAad(envelope) {
   return canonicalJson({ version: envelope.version, kind: envelope.kind, routing: envelope.routing })
 }
 
-/**
- * P0 deliberately accepts one action only. Unknown fields are rejected so a
- * caller cannot smuggle tool/payment semantics into something labelled chat.
- */
+function shortString(value, name, { optional = false, max = 256 } = {}) {
+  if (optional && value === undefined) return undefined
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) {
+    throw new IntentPolicyError(`${name} must contain 1-${max} characters`, `invalid_${name}`)
+  }
+  return value
+}
+
+function only(value, fields) {
+  if (Object.keys(value).some((key) => !fields.has(key))) {
+    throw new IntentPolicyError('Intent contains fields outside its declared action', 'unsupported_action')
+  }
+}
+
+/** Parse the complete P0 private conversation command vocabulary. */
 export function parseConversationIntent(text) {
   let value
   try {
@@ -53,40 +60,84 @@ export function parseConversationIntent(text) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new IntentPolicyError('Intent plaintext must be an object', 'invalid_plaintext')
   }
-  const allowed = new Set(['version', 'kind', 'targetAgentDid', 'text', 'conversationId'])
-  if (Object.keys(value).some((key) => !allowed.has(key))) {
-    throw new IntentPolicyError('P0 permits message-only Intent fields', 'unsupported_action')
+  if (value.version !== 1 || typeof value.kind !== 'string') {
+    throw new IntentPolicyError('Intent version or kind is unsupported', 'unsupported_action')
   }
-  if (value.version !== 1 || value.kind !== 'conversation.send') {
-    throw new IntentPolicyError('P0 permits only conversation.send', 'unsupported_action')
+
+  if (value.kind === 'conversation.send') {
+    only(value, new Set([
+      'version', 'kind', 'mode', 'targetAgentId', 'targetAgentAuthorityDid', 'text', 'conversationId',
+    ]))
+    if (value.mode !== 'direct' && value.mode !== 'assisted') {
+      throw new IntentPolicyError('mode must be direct or assisted', 'invalid_mode')
+    }
+    const targetAgentAuthorityDid = shortString(value.targetAgentAuthorityDid, 'targetAgentAuthorityDid')
+    if (!targetAgentAuthorityDid.startsWith('did:key:')) {
+      throw new IntentPolicyError('targetAgentAuthorityDid must be did:key', 'invalid_target')
+    }
+    if (typeof value.text !== 'string' || value.text.length === 0 || value.text.length > MAX_TEXT) {
+      throw new IntentPolicyError(`text must contain 1-${MAX_TEXT} characters`, 'invalid_message')
+    }
+    return {
+      version: 1,
+      kind: value.kind,
+      mode: value.mode,
+      targetAgentId: shortString(value.targetAgentId, 'targetAgentId'),
+      targetAgentAuthorityDid,
+      text: value.text,
+      conversationId: shortString(value.conversationId, 'conversationId', { optional: true }),
+    }
   }
-  if (typeof value.targetAgentDid !== 'string' || !value.targetAgentDid.startsWith('did:key:')) {
-    throw new IntentPolicyError('targetAgentDid must be did:key', 'invalid_target')
+
+  if (value.kind === 'conversation.sync') {
+    only(value, new Set(['version', 'kind', 'ownAgentId', 'peerAgentId', 'conversationId', 'cursor', 'limit']))
+    if (value.limit !== undefined && (!Number.isInteger(value.limit) || value.limit < 1 || value.limit > MAX_SYNC_LIMIT)) {
+      throw new IntentPolicyError(`limit must be an integer from 1-${MAX_SYNC_LIMIT}`, 'invalid_limit')
+    }
+    const conversationId = shortString(value.conversationId, 'conversationId', { optional: true })
+    const peerAgentId = shortString(value.peerAgentId, 'peerAgentId', { optional: true })
+    if (!conversationId && !peerAgentId) {
+      throw new IntentPolicyError('sync requires conversationId or peerAgentId', 'invalid_conversation')
+    }
+    return {
+      version: 1,
+      kind: value.kind,
+      ownAgentId: shortString(value.ownAgentId, 'ownAgentId'),
+      peerAgentId,
+      conversationId,
+      cursor: shortString(value.cursor, 'cursor', { optional: true }),
+      limit: value.limit ?? DEFAULT_SYNC_LIMIT,
+    }
   }
-  if (typeof value.text !== 'string' || value.text.length === 0 || value.text.length > MAX_TEXT) {
-    throw new IntentPolicyError(`text must contain 1-${MAX_TEXT} characters`, 'invalid_message')
+
+  if (value.kind === 'conversation.draft.decide') {
+    only(value, new Set(['version', 'kind', 'conversationId', 'draftId', 'decision']))
+    if (value.decision !== 'confirm' && value.decision !== 'cancel') {
+      throw new IntentPolicyError('decision must be confirm or cancel', 'invalid_decision')
+    }
+    return {
+      version: 1,
+      kind: value.kind,
+      conversationId: shortString(value.conversationId, 'conversationId'),
+      draftId: shortString(value.draftId, 'draftId'),
+      decision: value.decision,
+    }
   }
-  if (value.conversationId !== undefined && (typeof value.conversationId !== 'string' || value.conversationId.length > 256)) {
-    throw new IntentPolicyError('conversationId must be a short string', 'invalid_conversation')
-  }
-  return {
-    version: 1,
-    kind: 'conversation.send',
-    targetAgentDid: value.targetAgentDid,
-    text: value.text,
-    conversationId: value.conversationId,
-  }
+  throw new IntentPolicyError('Intent action is unsupported', 'unsupported_action')
 }
 
 function emptyStore() {
-  return { schemaVersion: STORE_VERSION, intents: [] }
+  return { schemaVersion: STORE_VERSION, intents: [], viewBindings: [] }
 }
 
 function safeStore(value) {
-  if (!value || value.schemaVersion !== STORE_VERSION || !Array.isArray(value.intents)) return emptyStore()
+  if (!value || !Array.isArray(value.intents)) return emptyStore()
   return {
     schemaVersion: STORE_VERSION,
     intents: value.intents.filter((record) => record && typeof record.intentId === 'string'),
+    viewBindings: Array.isArray(value.viewBindings)
+      ? value.viewBindings.filter((binding) => binding && typeof binding.browserSessionId === 'string')
+      : [],
   }
 }
 
@@ -94,11 +145,25 @@ function messageOf(error) {
   return error && error.message ? String(error.message) : String(error)
 }
 
+function envelopeIsValid(candidate) {
+  const result = validateEncryptedIntent(candidate)
+  if (result.valid) return true
+  // Temporary strict bridge while installed runtimes move from 0.3 to the
+  // published identity-separated contract.
+  const routing = candidate?.routing
+  return candidate?.version === 1 && candidate?.kind === 'human.intent' &&
+    typeof routing?.intentId === 'string' && typeof routing?.principalId === 'string' &&
+    typeof routing?.toAgentId === 'string' && typeof routing?.toAgentAuthorityDid === 'string' &&
+    typeof routing?.browserSessionId === 'string' && typeof routing?.viewPublicKey === 'string' &&
+    typeof routing?.issuedAt === 'string' && typeof routing?.expiresAt === 'string' &&
+    typeof candidate?.sealed === 'string'
+}
+
 export class LocalIntentQueue {
-  constructor({ store, crypto, sendConversation, postView, isAgentAvailable = async () => true, clock = () => new Date(), logger = console }) {
+  constructor({ store, crypto, executeIntent, postView, isAgentAvailable = async () => true, clock = () => new Date(), logger = console }) {
     this.store = store
     this.crypto = crypto
-    this.sendConversation = sendConversation
+    this.executeIntent = executeIntent
     this.postView = postView
     this.isAgentAvailable = isAgentAvailable
     this.clock = clock
@@ -109,12 +174,8 @@ export class LocalIntentQueue {
   async open() {
     if (this.data) return
     this.data = safeStore(await this.store.read())
-    // A process that died after declaring an attempt but before its durable
-    // outcome retries with the same intent/message id. Relay and recipient
-    // dedupe that id, so retry is safer than losing an unknown outcome.
-    for (const record of this.data.intents) {
-      if (record.state === 'processing') record.state = 'queued'
-    }
+    for (const record of this.data.intents) if (record.state === 'processing') record.state = 'queued'
+    this.pruneBindings()
     await this.persist()
   }
 
@@ -122,22 +183,23 @@ export class LocalIntentQueue {
     await this.store.write(this.data ?? emptyStore())
   }
 
+  pruneBindings() {
+    const now = this.clock().getTime()
+    this.data.viewBindings = this.data.viewBindings.filter((binding) => Date.parse(binding.expiresAt) > now)
+  }
+
   /** Persist first; only returned ids may be ACKed to Community. */
   async accept(candidates) {
     await this.open()
     const acknowledged = []
     for (const candidate of Array.isArray(candidates) ? candidates : []) {
-      const validation = validateEncryptedIntent(candidate)
-      if (!validation.valid) continue
+      if (!envelopeIsValid(candidate)) continue
       const existing = this.data.intents.find((record) => record.intentId === candidate.routing.intentId)
       if (existing) {
-        // Same id under different routing is hostile/confused input. Do not ACK
-        // it as the record we already persisted.
-        if (
-          existing.principalId === candidate.routing.principalId &&
+        if (existing.principalId === candidate.routing.principalId &&
           existing.browserSessionId === candidate.routing.browserSessionId &&
-          existing.ownAgentDid === candidate.routing.toAgentDid
-        ) acknowledged.push(existing.intentId)
+          existing.ownAgentId === candidate.routing.toAgentId &&
+          existing.ownAgentAuthorityDid === candidate.routing.toAgentAuthorityDid) acknowledged.push(existing.intentId)
         continue
       }
       const now = this.clock().toISOString()
@@ -145,13 +207,11 @@ export class LocalIntentQueue {
         intentId: candidate.routing.intentId,
         principalId: candidate.routing.principalId,
         browserSessionId: candidate.routing.browserSessionId,
-        ownAgentDid: candidate.routing.toAgentDid,
+        ownAgentId: candidate.routing.toAgentId,
+        ownAgentAuthorityDid: candidate.routing.toAgentAuthorityDid,
         viewPublicKey: candidate.routing.viewPublicKey,
         envelope: candidate,
-        state: 'queued',
-        attempts: 0,
-        receivedAt: now,
-        updatedAt: now,
+        state: 'queued', attempts: 0, receivedAt: now, updatedAt: now,
       })
       acknowledged.push(candidate.routing.intentId)
     }
@@ -163,125 +223,104 @@ export class LocalIntentQueue {
     await this.open()
     for (const record of this.data.intents) {
       if (record.state !== 'queued') continue
-      if (!(await this.isAgentAvailable(record.ownAgentDid))) continue
+      if (!(await this.isAgentAvailable(record.ownAgentId, record.ownAgentAuthorityDid))) continue
       await this.processOne(record)
     }
   }
 
   async processOne(record) {
-    record.state = 'processing'
-    record.attempts += 1
-    record.updatedAt = this.clock().toISOString()
+    record.state = 'processing'; record.attempts += 1; record.updatedAt = this.clock().toISOString()
     await this.persist()
-
     try {
-      const plaintext = await this.crypto.open(record.ownAgentDid, record.envelope.sealed, intentAad(record.envelope))
+      const plaintext = await this.crypto.open(record.ownAgentAuthorityDid, record.envelope.sealed, intentAad(record.envelope))
       const intent = parseConversationIntent(plaintext)
-      const conversationId = intent.conversationId || `web-${record.intentId}`
-      const outcome = await this.sendConversation({
+      if (intent.kind === 'conversation.sync' && intent.ownAgentId !== record.ownAgentId) {
+        throw new IntentPolicyError('sync ownAgentId does not match the selected Agent', 'agent_mismatch')
+      }
+      const result = await this.executeIntent({
         intentId: record.intentId,
-        messageId: record.intentId,
-        conversationId,
-        fromAgentDid: record.ownAgentDid,
-        toAgentDid: intent.targetAgentDid,
-        text: intent.text,
+        principalId: record.principalId,
+        ownAgentId: record.ownAgentId,
+        ownAgentAuthorityDid: record.ownAgentAuthorityDid,
+        intent,
       })
-      if (!outcome || outcome.ok !== true) throw new Error(outcome?.error || 'Agent message was not accepted for delivery')
-
-      record.state = 'sent'
-      record.conversationId = conversationId
-      record.remoteAgentDid = intent.targetAgentDid
-      record.envelope = undefined
-      record.lastError = undefined
-      record.updatedAt = this.clock().toISOString()
+      if (!result || result.ok !== true) throw new Error(result?.error || 'Agent did not accept the Intent')
+      record.state = result.state ?? 'completed'
+      record.conversationId = result.conversationId ?? intent.conversationId
+      record.remoteAgentId = result.remoteAgentId ?? intent.targetAgentId ?? intent.peerAgentId
+      record.envelope = undefined; record.lastError = undefined; record.updatedAt = this.clock().toISOString()
+      if (record.conversationId) this.bindBrowserView(record, record.conversationId)
       await this.persist()
-      // The Agent side effect is already durable at this point. Browser View
-      // delivery is a separate best-effort notification and must never roll a
-      // sent Intent back to queued (which could otherwise re-run the action).
-      try {
-        await this.publishView(record, {
-          version: 1,
-          kind: 'intent.status',
-          intentId: record.intentId,
-          state: 'agent_sent',
-          conversationId,
-          remoteAgentDid: intent.targetAgentDid,
-        })
-      } catch (viewError) {
-        this.logger.warn?.(`iFlow Web Intent ${record.intentId}: could not deliver sent view (${messageOf(viewError)})`)
+      for (const view of result.views ?? []) {
+        try { await this.publishView(record, view) }
+        catch (viewError) { this.logger.warn?.(`iFlow Web Intent ${record.intentId}: private view deferred (${messageOf(viewError)})`) }
       }
     } catch (error) {
       if (error instanceof IntentPolicyError || error instanceof IntentEnvelopeError) {
-        record.state = 'denied'
-        record.envelope = undefined
-        record.lastError = error.code
-        record.updatedAt = this.clock().toISOString()
+        record.state = 'denied'; record.envelope = undefined; record.lastError = error.code; record.updatedAt = this.clock().toISOString()
         await this.persist()
         try {
-          await this.publishView(record, {
-            version: 1,
-            kind: 'intent.status',
-            intentId: record.intentId,
-            state: 'policy_denied',
-            code: error.code,
-          })
-        } catch (viewError) {
-          this.logger.warn?.(`iFlow Web Intent ${record.intentId}: could not deliver refusal view (${messageOf(viewError)})`)
-        }
+          await this.publishView(record, { version: 1, kind: 'conversation.status', conversationId: record.conversationId ?? '', state: 'failed', code: error.code })
+        } catch (viewError) { this.logger.warn?.(`iFlow Web Intent ${record.intentId}: refusal view deferred (${messageOf(viewError)})`) }
         return
       }
-      // Network/runtime failure is retryable. Keep only sealed ciphertext and
-      // a short local error code; never log or persist Human plaintext.
-      record.state = 'queued'
-      record.lastError = 'delivery_failed'
-      record.updatedAt = this.clock().toISOString()
+      record.state = 'queued'; record.lastError = 'delivery_failed'; record.updatedAt = this.clock().toISOString()
       await this.persist()
       this.logger.log?.(`iFlow Web Intent ${record.intentId}: delivery deferred (${messageOf(error)})`)
     }
   }
 
-  async publishView(record, payload) {
+  bindBrowserView(record, conversationId) {
+    const key = `${record.principalId}\u0000${record.ownAgentId}\u0000${record.browserSessionId}\u0000${conversationId}`
     const now = this.clock()
+    this.data.viewBindings = this.data.viewBindings.filter((binding) => binding.key !== key)
+    this.data.viewBindings.push({
+      key, principalId: record.principalId, ownAgentId: record.ownAgentId,
+      browserSessionId: record.browserSessionId, conversationId,
+      anchorIntentId: record.intentId, viewPublicKey: record.viewPublicKey,
+      expiresAt: new Date(now.getTime() + VIEW_TTL_MS).toISOString(),
+    })
+  }
+
+  async publishView(recordOrBinding, payload) {
+    const now = this.clock()
+    const conversationId = payload.conversationId || recordOrBinding.conversationId
     const envelope = {
-      version: 1,
-      kind: 'browser.view',
+      version: 1, kind: 'browser.view',
       routing: {
         deliveryId: `ivw_${crypto.randomUUID()}`,
-        intentId: record.intentId,
-        principalId: record.principalId,
-        browserSessionId: record.browserSessionId,
-        viewKeyId: await this.crypto.keyId(record.viewPublicKey),
-        issuedAt: now.toISOString(),
-        expiresAt: new Date(now.getTime() + VIEW_TTL_MS).toISOString(),
-      },
-      sealed: '',
+        intentId: recordOrBinding.intentId ?? recordOrBinding.anchorIntentId,
+        principalId: recordOrBinding.principalId,
+        browserSessionId: recordOrBinding.browserSessionId,
+        viewKeyId: await this.crypto.keyId(recordOrBinding.viewPublicKey),
+        ...(conversationId ? { conversationId } : {}),
+        ...(recordOrBinding.ownAgentId ? { ownAgentId: recordOrBinding.ownAgentId } : {}),
+        issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + VIEW_TTL_MS).toISOString(),
+      }, sealed: '',
     }
-    envelope.sealed = await this.crypto.seal(record.viewPublicKey, JSON.stringify(payload), browserViewAad(envelope))
+    envelope.sealed = await this.crypto.seal(recordOrBinding.viewPublicKey, JSON.stringify(payload), browserViewAad(envelope))
     await this.postView(envelope)
     return envelope.routing.deliveryId
   }
 
-  /** A remote reply is re-encrypted immediately; plaintext is never stored here. */
-  async deliverReply(conversationId, text, fromAgentDid) {
-    await this.open()
-    const record = this.data.intents.find(
-      (candidate) => candidate.state === 'sent' && candidate.conversationId === conversationId,
-    )
-    if (!record) return false
-    await this.publishView(record, {
-      version: 1,
-      kind: 'conversation.reply',
-      intentId: record.intentId,
-      conversationId,
-      fromAgentDid,
-      text,
-    })
-    return true
+  /** Fan out one reply to every live browser session bound to this conversation. */
+  async deliverReply(conversationId, message) {
+    await this.open(); this.pruneBindings()
+    const bindings = this.data.viewBindings.filter((binding) => binding.conversationId === conversationId)
+    let delivered = 0
+    for (const binding of bindings) {
+      try {
+        await this.publishView(binding, { version: 1, kind: 'conversation.message', conversationId, message })
+        delivered += 1
+      } catch (error) { this.logger.warn?.(`iFlow Web View ${binding.browserSessionId}: reply deferred (${messageOf(error)})`) }
+    }
+    await this.persist()
+    return delivered > 0
   }
 
   async status() {
     await this.open()
-    return this.data.intents.map(({ envelope: _sealed, ...record }) => ({ ...record }))
+    return this.data.intents.map(({ envelope: _sealed, viewPublicKey: _key, ...record }) => ({ ...record }))
   }
 }
 
@@ -298,11 +337,8 @@ export function startLocalIntentPolling({ queue, settings, inbox, ack, intervalM
       const persisted = await queue.accept(envelopes)
       if (persisted.length > 0) await ack(current, persisted)
       await queue.process()
-    } catch (error) {
-      logger.log?.(`iFlow Web Intent: poll skipped (${messageOf(error)})`)
-    } finally {
-      running = false
-    }
+    } catch (error) { logger.log?.(`iFlow Web Intent: poll skipped (${messageOf(error)})`) }
+    finally { running = false }
   }
   void tick()
   const timer = setInterval(() => void tick(), intervalMs)
