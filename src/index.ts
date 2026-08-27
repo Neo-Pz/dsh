@@ -1522,7 +1522,12 @@ ${text}`)
         // path: a resumed session is no less remote than a fresh one.
         if (presetId) await ctx.agentPresets.mount(agentCtx, presetId)
       }
-      const meta = { cwd: workspace, origin: 'subagent', ...(presetId ? { agentPreset: presetId } : {}) }
+      // iFlow conversations are ordinary DSH conversations with a remote
+      // Agent as their peer.  `origin: 'subagent'` makes DSH deliberately
+      // hide them in the child-agent surface instead of the selected
+      // workspace's normal session list, which is the opposite of the chat
+      // product: people must be able to find and reopen these threads.
+      const meta = { cwd: workspace, ...(presetId ? { agentPreset: presetId } : {}) }
 
       let handle
       let resumed = false
@@ -3593,7 +3598,10 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         const sessionId = `iflow-${uid('agent')}`
         handle = await agents.create({
           sessionId,
-          meta: { cwd: workspace, origin: 'subagent' },
+          // Keep the session in the normal DSH workspace conversation list.
+          // The ConversationBinding carries the iFlow-specific identity; a
+          // subagent origin is neither necessary nor correct here.
+          meta: { cwd: workspace },
           agentOptions,
           signal: controller.signal,
         })

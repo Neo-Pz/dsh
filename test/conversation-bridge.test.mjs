@@ -262,6 +262,8 @@ describe('scenario A — first contact waits for a person', () => {
         'the accepted task to complete')
       const done = await getTask(host, task.id)
       assert.equal(host.created.length, 1, 'accepting is what creates the session')
+      assert.equal(host.created[0].meta.cwd, workspace, 'the normal DSH session is filed under the selected workspace')
+      assert.equal(host.created[0].meta.origin, undefined, 'iFlow conversations must not be hidden as subagent sessions')
       assert.match(done.artifacts[0].parts[0].text, /echo: can you analyse this CSV\?/)
 
       // conversationId is shared; the local session id is not, and is not in
