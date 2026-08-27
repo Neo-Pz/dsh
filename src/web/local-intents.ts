@@ -96,9 +96,6 @@ export function parseConversationIntent(text) {
     }
     const conversationId = shortString(value.conversationId, 'conversationId', { optional: true })
     const peerAgentId = shortString(value.peerAgentId, 'peerAgentId', { optional: true })
-    if (!conversationId && !peerAgentId) {
-      throw new IntentPolicyError('sync requires conversationId or peerAgentId', 'invalid_conversation')
-    }
     return {
       version: 1,
       kind: value.kind,

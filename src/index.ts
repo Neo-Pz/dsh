@@ -3695,6 +3695,30 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       if (!fromAgent) throw new IntentEnvelopeError('selected Agent identity or Authority is unavailable', 'agent_unavailable')
 
       if (intent.kind === 'conversation.sync') {
+        if (!intent.conversationId && !intent.peerAgentId) {
+          const offset = Math.max(0, Number(intent.cursor) || 0)
+          const visible = Object.values(state.conversations)
+            .filter((candidate) => candidate.localAgentId === ownAgentId)
+            .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+          const page = visible.slice(offset, offset + intent.limit)
+          return {
+            ok: true,
+            views: [{
+              version: 1,
+              kind: 'conversation.list',
+              ownAgentId,
+              conversations: page.map((candidate) => ({
+                conversationId: candidate.conversationId,
+                peerAgentId: candidate.peerAgentId,
+                peerLabel: candidate.peer || candidate.peerAgentId || 'Agent',
+                mode: candidate.mode === 'assisted' ? 'assisted' : 'direct',
+                state: candidate.state,
+                updatedAt: candidate.updatedAt,
+              })),
+              ...(offset + page.length < visible.length ? { nextCursor: String(offset + page.length) } : {}),
+            }],
+          }
+        }
         const conversation = intent.conversationId
           ? state.conversations[intent.conversationId]
           : findActiveConversation(state.conversations, ownAgentId, intent.peerAgentId)

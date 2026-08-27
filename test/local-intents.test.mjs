@@ -191,6 +191,12 @@ describe('P0 conversation Intent contract', () => {
     assert.deepEqual(parseConversationIntent(JSON.stringify({
       version: 1, kind: 'conversation.sync', ownAgentId: 'own-agent', peerAgentId: 'peer-agent',
     })).limit, 50)
+    assert.deepEqual(parseConversationIntent(JSON.stringify({
+      version: 1, kind: 'conversation.sync', ownAgentId: 'own-agent',
+    })), {
+      version: 1, kind: 'conversation.sync', ownAgentId: 'own-agent',
+      peerAgentId: undefined, conversationId: undefined, cursor: undefined, limit: 50,
+    })
     assert.equal(parseConversationIntent(JSON.stringify({
       version: 1, kind: 'conversation.draft.decide', conversationId: 'conv-1', draftId: 'draft-1', decision: 'confirm',
     })).decision, 'confirm')
