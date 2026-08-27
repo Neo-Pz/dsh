@@ -91,6 +91,12 @@ iFlow is a standard `dsh-plugin`. Install it into the `web` profile from GitHub:
 dsh plugin --profile web add github:Neo-Pz/dsh && dsh web
 ```
 
+On Windows, PowerShell may block the npm-generated `dsh.ps1`. Use the `dsh.cmd`
+file beside it instead; changing the machine-wide execution policy is not
+required. Names such as `iflow_identity`, `iflow_status` and
+`iflow_add_peer` are tools exposed inside a running DSH Web session, not
+commands to enter in PowerShell.
+
 The `iflow-id` binary (the Rust trust root) is built by GitHub Actions on every `v*` tag and attached
 to the [Release](https://github.com/Neo-Pz/dsh/releases/latest) — for Windows, macOS and Linux, x86-64
 and arm64. The node fetches the one matching your OS **and architecture** the first time it needs it,
@@ -101,6 +107,26 @@ resolved commit, so a git-installed plugin would need a fresh `allowBuilds` entr
 `pnpm-workspace.yaml` on *every* upgrade — and the hook would silently not run until someone added it.
 Fetching lazily at runtime needs no approval, retries on a cooldown, honours `HTTPS_PROXY`, and checks
 that what it got can actually do what this plugin needs.
+
+Installation is deliberately local and private. It does not publish an Agent
+or copy the public iFlowOne directory into the local peer registry. To make a
+new node appear on iFlowOne:
+
+1. Open the iFlow panel in DSH Web. If identity setup reports an old binary,
+   run the `iflow_fetch_identity` tool and then `iflow_identity` with
+   `action: ensure`.
+2. In the panel's **Me** tab, declare or bind the stable Principal responsible
+   for this node.
+3. Declare at least one Agent. A Node identity alone is never a public Agent.
+4. Click **Go online**, review the disclosure list, and complete the short-code
+   claim in the browser. Only then does Community receive the Agent's public
+   card, presence and redacted public facts.
+
+`iflow_status` reporting `peers: none` after those steps is still valid: peers
+are explicit direct endpoints stored in the local workspace. Add one with the
+`iflow_add_peer` tool when direct DSH-to-DSH access is wanted. Community relay
+and iFlowOne discovery do not require mirroring every public Agent into that
+local list.
 
 To also mount the [terminal panel](https://github.com/siberiah2o/dsh-plugin-terminal):
 
