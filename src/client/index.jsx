@@ -50,7 +50,7 @@ function useOpen(store) {
   return React.useSyncExternalStore(store.subscribe, store.get, store.get)
 }
 
-export const inject = ['slots']
+export const inject = ['slots', 'workspaces']
 
 export function apply(ctx) {
   const disposeStyles = insertStyles()
@@ -64,7 +64,7 @@ export function apply(ctx) {
     const open = useOpen(openState)
     return (
       <IFlowOverlay open={open} onClose={() => openState.set(false)}>
-        <IFlowHub />
+        <IFlowHub pickWorkspace={() => ctx.workspaces?.pickDirectory?.()} />
       </IFlowOverlay>
     )
   }
@@ -87,7 +87,7 @@ export function apply(ctx) {
         // than freezing whatever was current at registration.
         label: () => 'iFlow · 弗流',
       },
-      IFlowHub,
+      () => <IFlowHub pickWorkspace={() => ctx.workspaces?.pickDirectory?.()} />,
     ),
   )
 

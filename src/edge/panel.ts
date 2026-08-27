@@ -113,6 +113,14 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.setVisibility(body.visibility))
     }, { write: true })],
 
+    // The folder is private local configuration.  It determines where future
+    // ordinary DSH conversation sessions are created; it is never projected,
+    // relayed, or included in an AgentCard.
+    ['/iflow/panel/conversation-workspace', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.setConversationWorkspace(body.path))
+    }, { write: true })],
+
     ['/iflow/panel/identity/fetch', 'POST', guard(async (_request, response) => {
       send(response, 200, await deps.fetchIdentity())
     }, { write: true })],

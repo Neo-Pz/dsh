@@ -102,6 +102,17 @@ resolved commit, so a git-installed plugin would need a fresh `allowBuilds` entr
 Fetching lazily at runtime needs no approval, retries on a cooldown, honours `HTTPS_PROXY`, and checks
 that what it got can actually do what this plugin needs.
 
+### Choose where iFlow conversations live
+
+After installation, open **iFlow → 我** before accepting or starting an Agent conversation. Confirm the
+suggested DSH workspace, choose a folder with DSH's directory picker, or enter an existing absolute path.
+Until this local confirmation iFlow will not create a conversation session. Every new iFlow conversation
+is then created as an ordinary DSH session in that folder and appears in the normal session list.
+
+Changing the folder later applies only to newly created conversations. Existing conversations retain the
+folder and local DSH session they were originally bound to; neither is moved, deleted, uploaded, nor used
+to derive a new Node identity.
+
 To also mount the [terminal panel](https://github.com/siberiah2o/dsh-plugin-terminal):
 
 ```sh

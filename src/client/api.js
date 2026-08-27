@@ -41,6 +41,8 @@ export const api = {
   claimPoll: () => call('/iflow/panel/claim/poll', { method: 'POST' }),
   stop: () => call('/iflow/panel/publish/stop', { method: 'POST' }),
   setVisibility: (visibility) => call('/iflow/panel/visibility', { method: 'POST', body: { visibility } }),
+  setConversationWorkspace: (path) =>
+    call('/iflow/panel/conversation-workspace', { method: 'POST', body: { path } }),
   fetchIdentity: () => call('/iflow/panel/identity/fetch', { method: 'POST' }),
   declarePrincipal: (label) => call('/iflow/panel/principal/declare', { method: 'POST', body: { label } }),
   bindPrincipal: (principalId) => call('/iflow/panel/principal/bind', { method: 'POST', body: { principalId } }),
