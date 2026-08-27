@@ -12,14 +12,14 @@ export function ownedAgentBindings(declarations, principalId) {
     .filter((agent) => agent && (!agent.principalId || agent.principalId === principalId))
     .map((agent) => ({
       agentId: agent.agentId,
-      agentDid: agent.did,
+      agentAuthorityDid: agent.did,
       ...(agent.label ? { label: agent.label } : {}),
       relationship: 'owned',
       right: 'send_as',
       scope: ['message'],
       ...(agent.grantRef ? { grantRef: agent.grantRef } : {}),
     }))
-    .sort((a, b) => a.agentId.localeCompare(b.agentId) || a.agentDid.localeCompare(b.agentDid))
+    .sort((a, b) => a.agentId.localeCompare(b.agentId) || a.agentAuthorityDid.localeCompare(b.agentAuthorityDid))
 }
 
 export function webChallengeSigningPayload({ challenge, nodeId, principal, agentBindings }) {

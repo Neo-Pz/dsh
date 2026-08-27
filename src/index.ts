@@ -45,7 +45,10 @@ import {
 } from './a2a/protocol.js'
 import { signingDigest, simpleHash } from './util/hash.js'
 import {
+  activateConversation,
   bindSession,
+  decideDraft,
+  findActiveConversation,
   loadConversations,
   markOutbound,
   pendingOutbound,
@@ -54,6 +57,7 @@ import {
   markSeen,
   messageDigest,
   newConversation,
+  putDraft,
   saveConversations,
   saveTrust,
   trustDecision,
@@ -114,7 +118,11 @@ export default {
       version: '1.0.0',
       syncVersion: '20',
       updatedAt: new Date().toISOString(),
-      alias: 'if-lt',
+      // A private label for this runtime node. It is never an Agent identity
+      // and must not appear as a Conversation participant or signature actor.
+      alias: typeof config.nodeLabel === 'string' && config.nodeLabel.trim()
+        ? config.nodeLabel.trim()
+        : (typeof config.alias === 'string' && config.alias.trim() ? config.alias.trim() : 'DSH Node'),
       // Seeded from plugin config so a node can come up with auth already on;
       // `iflow_set_token` still changes it at runtime.
       token: typeof config.token === 'string' && config.token.length > 0 ? config.token : null,
@@ -139,6 +147,22 @@ export default {
       // did:key of every Agent an operator declared here, so the relay can be
       // told which Agents to route to this node.
       declaredAgentDids: {},
+    }
+
+    const nodeSettingsFile = join(workspace, '.iflow', 'node.json')
+    const nodeLabelReady = (async () => {
+      try {
+        const stored = JSON.parse(await ctx.fs.readText(await ctx.fs.resolve(nodeSettingsFile)))
+        if (typeof stored.nodeLabel === 'string' && stored.nodeLabel.trim()) state.alias = stored.nodeLabel.trim()
+      } catch { /* a fresh Node has no local label file */ }
+    })()
+
+    async function persistNodeLabel() {
+      await ctx.fs.writeText(await ctx.fs.resolve(nodeSettingsFile), JSON.stringify({
+        schemaVersion: 1,
+        nodeLabel: state.alias,
+        updatedAt: iso(),
+      }, null, 2))
     }
 
     // Scratch files handed to the iflow-id binary (Windows argv has a length
@@ -312,14 +336,40 @@ export default {
      * it, gets one minted here, and never notices — no parallel header, no
      * version negotiation, no break.
      */
-    function resolveConversation(conversationId, { peer, peerDid, preview, state: initial } = {}) {
+    function resolveConversation(conversationId, {
+      peer,
+      peerDid,
+      localAgentId,
+      localAgentAuthorityDid,
+      peerAgentId,
+      peerAgentAuthorityDid,
+      mode,
+      preview,
+      state: initial,
+    } = {}) {
       let conversation = state.conversations[conversationId]
       if (!conversation) {
-        conversation = newConversation(conversationId, { peer, peerDid, preview, state: initial, now: iso() })
+        conversation = newConversation(conversationId, {
+          peer,
+          peerDid,
+          localAgentId,
+          localAgentAuthorityDid,
+          peerAgentId,
+          peerAgentAuthorityDid,
+          mode,
+          preview,
+          state: initial,
+          now: iso(),
+        })
         state.conversations[conversationId] = conversation
       } else {
         if (peer && !conversation.peer) conversation.peer = peer
         if (peerDid && !conversation.peerDid) conversation.peerDid = peerDid
+        if (localAgentId && !conversation.localAgentId) conversation.localAgentId = localAgentId
+        if (localAgentAuthorityDid && !conversation.localAgentAuthorityDid) conversation.localAgentAuthorityDid = localAgentAuthorityDid
+        if (peerAgentId && !conversation.peerAgentId) conversation.peerAgentId = peerAgentId
+        if (peerAgentAuthorityDid && !conversation.peerAgentAuthorityDid) conversation.peerAgentAuthorityDid = peerAgentAuthorityDid
+        if (mode === 'direct' || mode === 'assisted') conversation.mode = mode
         conversation.updatedAt = iso()
       }
       return conversation
@@ -519,7 +569,17 @@ export default {
      * verification on it. Nothing about arriving via the relay makes a message
      * more trusted, or differently trusted.
      */
-    async function sendViaRelay({ peer, toDid, prompt, conversationId, messageId, fromAgent }) {
+    async function sendViaRelay({
+      peer,
+      toAgentId,
+      toAgentAuthorityDid,
+      prompt,
+      conversationId,
+      messageId,
+      fromAgent,
+      contentOrigin = 'agent',
+      originIntentId,
+    }) {
       const settings = relaySettings()
       if (!settings) return { ok: false, error: 'no relay configured' }
       // Said here rather than letting `iflow-id seal` fail with "unknown
@@ -534,7 +594,13 @@ export default {
         }
       }
 
-      const fromDid = fromAgent?.did ?? state.nodeDid
+      if (!fromAgent?.agentId || !fromAgent?.did) {
+        return { ok: false, error: 'an explicitly declared sending Agent is required' }
+      }
+      if (!toAgentId || !toAgentAuthorityDid) {
+        return { ok: false, error: 'the target Agent id and current Authority DID are required' }
+      }
+      const fromDid = fromAgent.did
       const request = {
         jsonrpc: '2.0',
         id: uid('req'),
@@ -548,12 +614,19 @@ export default {
           },
           configuration: { returnImmediately: true, historyLength: 0 },
           metadata: {
-            from: fromAgent?.agentId ?? state.alias,
+            from: fromAgent.label || fromAgent.agentId,
+            fromAgentId: fromAgent.agentId,
+            fromAgentAuthorityDid: fromAgent.did,
+            fromLabel: fromAgent.label || fromAgent.agentId,
+            toAgentId,
+            toAgentAuthorityDid,
             machine: await getMachineName(),
             conversationId,
             messageId,
-            actorType: fromAgent ? 'agent' : 'human',
-            origin: fromAgent ? 'web_intent' : 'keyboard',
+            contentOrigin,
+            originIntentId,
+            actorType: 'agent',
+            origin: originIntentId ? 'web_intent' : 'agent',
             principalId: state.principalId ?? undefined,
             // So the recipient can tell how this arrived. It changes nothing
             // about verification; it is for the operator reading a thread.
@@ -565,25 +638,25 @@ export default {
 
       // The same signature a direct POST would carry, over the same path, so
       // the far side's digest check lines up without a special case.
-      let signature = null
+      let signature
+      const bodyPath = scratchPath('relay-sign.json')
       try {
-        const id = fromAgent ? { did: fromAgent.did } : await getIdentity()
-        if (id.did) {
-          const bodyPath = scratchPath('relay-sign.json')
-          await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
-          const signingHome = fromAgent ? agentHome(join, workspace, fromAgent.agentId) : undefined
-          signature = JSON.parse(
-            await iflowId(['sign-file', 'POST', '/a2a', bodyPath], signingHome ?? 20, signingHome ? 20 : undefined),
-          )
-        }
+        await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
+        const signingHome = agentHome(join, workspace, fromAgent.agentId)
+        signature = JSON.parse(
+          await iflowId(['sign-file', 'POST', '/a2a', bodyPath], signingHome, 20),
+        )
       } catch (err) {
-        // Signing is best-effort here exactly as it is on the direct path: an
-        // unsigned message is degraded, and it is the recipient's trust policy
-        // that decides what that is worth.
+        return {
+          ok: false,
+          error: `the selected Agent could not sign this message: ${String(err?.message ?? err)}`,
+        }
+      } finally {
+        try { unlinkSync(bodyPath) } catch { /* sign failed before the scratch file existed */ }
       }
 
       const sealed = await relay.seal({
-        toDid,
+        toDid: toAgentAuthorityDid,
         body,
         signature,
         conversationId,
@@ -593,7 +666,7 @@ export default {
       const answer = await relay.send({
         url: settings.url,
         token: settings.token,
-        toDid,
+        toDid: toAgentAuthorityDid,
         sealed,
         messageId,
         conversationId,
@@ -703,6 +776,13 @@ export default {
         return
       }
 
+      if (conversationId) {
+        try { await appendReplyToConversation(conversationId, text, envelope.id) }
+        catch (error) {
+          console.error(`iFlow: could not append reply to local Conversation ${conversationId} (${error?.message ?? error})`)
+        }
+      }
+
       await recordExchange('remote', text, `[agent:${peer ?? envelope.from_did ?? 'remote'}]`, peer, {
         conversationId,
         messageId: envelope.id,
@@ -712,7 +792,17 @@ export default {
       let deliveredToBrowser = false
       if (webIntentQueue && conversationId) {
         try {
-          deliveredToBrowser = await webIntentQueue.deliverReply(conversationId, text, envelope.from_did ?? peer ?? 'unknown')
+          deliveredToBrowser = await webIntentQueue.deliverReply(conversationId, {
+            messageId: envelope.id,
+            conversationId,
+            authorAgentId: conversation?.peerAgentId ?? peer ?? envelope.from_did ?? 'unknown',
+            authorLabel: conversation?.peer ?? peer ?? 'Agent',
+            contentOrigin: 'agent',
+            role: 'agent',
+            text,
+            createdAt: iso(),
+            state: 'delivered',
+          })
         } catch (error) {
           // Never attach reply text to an error/log. The local conversation
           // remains the recoverable source; Community is not a transcript.
@@ -750,13 +840,28 @@ ${text}`)
       try {
         const body = JSON.stringify(rpcResult(task.replyTo.requestId, { task: snapshot(taskId, true) }))
         const messageId = uid('msg')
+        const declarations = await loadDeclarations(ctx, join, workspace)
+        const respondingAgent = declarations.agents.find((agent) => agent.agentId === task.replyTo.respondingAgentId)
+        if (!respondingAgent) throw new Error('the responding Agent is no longer declared on this Node')
+        const bodyPath = scratchPath(`relay-reply-${messageId}.json`)
+        await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
+        let signature
+        try {
+          signature = JSON.parse(await iflowId(
+            ['sign-file', 'POST', '/a2a', bodyPath],
+            agentHome(join, workspace, respondingAgent.agentId),
+            20,
+          ))
+        } finally {
+          try { unlinkSync(bodyPath) } catch { /* already absent */ }
+        }
         const sealed = await relay.seal({
           toDid: task.replyTo.did,
           body,
-          signature: null,
+          signature,
           conversationId: task.replyTo.conversationId,
           messageId,
-          fromDid: state.nodeDid,
+          fromDid: respondingAgent.did,
         })
         const answer = await relay.send({
           url: settings.url,
@@ -765,7 +870,7 @@ ${text}`)
           sealed,
           messageId,
           conversationId: task.replyTo.conversationId,
-          fromDid: state.nodeDid,
+          fromDid: respondingAgent.did,
         })
         if (!answer || answer.state !== 'queued') {
           console.error(`iFlow relay: could not return the answer for ${taskId}: ${JSON.stringify(answer)}`)
@@ -1457,7 +1562,7 @@ ${text}`)
       const child = handle.agent
       if (!resumed) {
         try {
-          ctx.sessionTitle.rename(child.session, `iFlow · ${from || 'remote'}`)
+          ctx.sessionTitle.rename(child.session, from || conversation?.peerAgentId || 'Agent')
         } catch (err) {
           console.error('iFlow rename failed', err)
         }
@@ -1509,7 +1614,7 @@ ${text}`)
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
         // The reply is this Agent speaking, on the same thread the request
         // arrived on, addressed back to whoever asked.
-        await recordExchange('self', textOut, `[agent:${state.alias}]`, from, {
+        await recordExchange('self', textOut, `[agent:${thread.localAgentLabel || conversation?.localAgentId || 'Agent'}]`, from, {
           conversationId: thread.conversationId,
           actorType: 'agent',
           origin: 'agent',
@@ -1526,7 +1631,20 @@ ${text}`)
       const text = messageText(message)
       if (text.length === 0) throw rpcException(-32602, 'Invalid parameters', 'message.parts must contain at least one text or data part')
       const metadata = params && params.metadata && typeof params.metadata === 'object' ? params.metadata : {}
-      const from = typeof metadata.from === 'string' && metadata.from.length > 0 ? metadata.from : undefined
+      const fromAgentId = typeof metadata.fromAgentId === 'string' && metadata.fromAgentId.length > 0
+        ? metadata.fromAgentId
+        : (typeof metadata.from === 'string' && metadata.from.length > 0 ? metadata.from : undefined)
+      const from = typeof metadata.fromLabel === 'string' && metadata.fromLabel.length > 0
+        ? metadata.fromLabel
+        : fromAgentId
+      const declaredAuthority = typeof metadata.fromAgentAuthorityDid === 'string'
+        ? metadata.fromAgentAuthorityDid
+        : undefined
+      if (declaredAuthority && signerDid && declaredAuthority !== signerDid) {
+        throw rpcException(-32003, 'Agent Authority mismatch', 'signed request does not match fromAgentAuthorityDid')
+      }
+      const toAgentId = typeof metadata.toAgentId === 'string' ? metadata.toAgentId : undefined
+      const toAgentAuthorityDid = typeof metadata.toAgentAuthorityDid === 'string' ? metadata.toAgentAuthorityDid : undefined
       await conversationsReady
       const taskId = `iflow-${uid('task')}`
 
@@ -1546,13 +1664,17 @@ ${text}`)
         uid('msg')
       // Who produced the words. The network actor is always the Agent; this
       // says whether a person typed them or the Agent spoke on its own.
-      const actorType = metadata.actorType === 'human' ? 'human' : 'agent'
+      const actorType = metadata.contentOrigin === 'human' || metadata.actorType === 'human' ? 'human' : 'agent'
       const origin = typeof metadata.origin === 'string' ? metadata.origin : 'a2a'
 
       const known = state.conversations[conversationId]
       const conversation = resolveConversation(conversationId, {
         peer: from,
         peerDid: signerDid,
+        localAgentId: toAgentId,
+        localAgentAuthorityDid: toAgentAuthorityDid,
+        peerAgentId: fromAgentId,
+        peerAgentAuthorityDid: declaredAuthority || signerDid,
         preview: text,
       })
       const firstSighting = !known
@@ -1608,7 +1730,12 @@ ${text}`)
       }
       // Where to send the answer, when there is no connection to answer on.
       if (arrival && arrival.via === 'relay' && arrival.replyToDid) {
-        task.replyTo = { did: arrival.replyToDid, requestId: arrival.requestId, conversationId }
+        task.replyTo = {
+          did: arrival.replyToDid,
+          requestId: arrival.requestId,
+          conversationId,
+          respondingAgentId: toAgentId,
+        }
       }
       state.tasks.set(taskId, task)
       observeEdge('a2a.request_received', (observer) =>
@@ -1692,6 +1819,7 @@ ${text}`)
         messageId,
         actorType,
         origin,
+        localAgentLabel: toAgentId,
       })
       state.outgoing.get(taskId).done = done
       done.catch((err) => console.error(`iFlow task ${taskId} unhandled run error`, err))
@@ -1749,6 +1877,7 @@ ${text}`)
         messageId: parked.messageId,
         actorType: parked.actorType,
         origin: parked.origin,
+        localAgentLabel: conversation.localAgentId,
       })
       state.outgoing.get(parked.taskId).done = done
       done.catch((err) => console.error(`iFlow task ${parked.taskId} unhandled run error`, err))
@@ -2171,7 +2300,7 @@ ${text}`)
 
       defineTool({
         name: 'iflow_set_alias',
-        description: 'iFlow: set this machine\'s display alias (a remark name, not the hostname), attached to outbound SendMessage metadata so the remote can name its incoming sessions (e.g. "iFlow · <alias>"). Default "if-lt".',
+        description: 'iFlow: set this Runtime Node\'s private display label. It is stored locally and never substitutes for an Agent identity.',
         parameters: {
           alias: { type: 'string', required: true, description: 'Display alias, e.g. if-lt or if-dsk.' },
         },
@@ -2187,7 +2316,8 @@ ${text}`)
           render: (_args, value) => [{ type: 'text', text: `iFlow alias → ${value.alias}` }],
         },
         async execute(args) {
-          state.alias = typeof args.alias === 'string' && args.alias.trim().length > 0 ? args.alias.trim() : 'if-lt'
+          state.alias = typeof args.alias === 'string' && args.alias.trim().length > 0 ? args.alias.trim() : 'DSH Node'
+          await persistNodeLabel()
           return { ok: true, alias: state.alias }
         },
       }),
@@ -2598,6 +2728,7 @@ ${text}`)
           waitForCompletion: { type: 'boolean', description: 'Wait for the remote task to finish and return its answer. Default true.' },
           maxWaitSeconds: { type: 'integer', description: 'Cap on how long to wait for completion. Default 600 (10 minutes), max 3600.' },
           conversationId: { type: 'string', description: 'Continue an existing conversation with this peer. Omit to start a new one; use iflow_conversations to list them.' },
+          fromAgentId: { type: 'string', description: 'Declared Agent that signs and sends. Required when this Node has more than one Agent.' },
         },
         output: {
           schema: {
@@ -2623,6 +2754,19 @@ ${text}`)
         async execute(args) {
           const entry = resolvePeer(args.peer)
           if (!entry) return { ok: false, peer: args.peer, error: `unknown peer or invalid URL: ${args.peer}` }
+          const declarations = await loadDeclarations(ctx, join, workspace)
+          const fromAgent = typeof args.fromAgentId === 'string' && args.fromAgentId
+            ? declarations.agents.find((agent) => agent.agentId === args.fromAgentId)
+            : (declarations.agents.length === 1 ? declarations.agents[0] : undefined)
+          if (!fromAgent) {
+            return {
+              ok: false,
+              peer: args.peer,
+              error: declarations.agents.length > 1
+                ? 'choose fromAgentId; a Node label cannot act as one of several Agents'
+                : 'declare an Agent before sending; the Node itself is not a Conversation participant',
+            }
+          }
           const base = entry.url
           const token = entry.token
           await conversationsReady
@@ -2694,7 +2838,10 @@ ${text}`)
                 },
                 configuration: { returnImmediately: true, historyLength: 0 },
                 metadata: {
-                  from: state.alias,
+                  from: fromAgent.label || fromAgent.agentId,
+                  fromAgentId: fromAgent.agentId,
+                  fromAgentAuthorityDid: fromAgent.did,
+                  fromLabel: fromAgent.label || fromAgent.agentId,
                   machine: await getMachineName(),
                   ...(item.conversationId ? { conversationId: item.conversationId } : {}),
                   ...(item.messageId ? { messageId: item.messageId } : {}),
@@ -2722,7 +2869,12 @@ ${text}`)
               },
               configuration: { returnImmediately: true, historyLength: 0 },
               metadata: {
-                from: state.alias,
+                from: fromAgent.label || fromAgent.agentId,
+                fromAgentId: fromAgent.agentId,
+                fromAgentAuthorityDid: fromAgent.did,
+                fromLabel: fromAgent.label || fromAgent.agentId,
+                toAgentId: args.peer,
+                toAgentAuthorityDid: entry.did,
                 machine: await getMachineName(),
                 // Additive: an older peer ignores keys it does not know, so
                 // none of this can break an existing bridge.
@@ -2749,13 +2901,16 @@ ${text}`)
               try {
                 const relayed = await sendViaRelay({
                   peer: args.peer,
-                  toDid: registered.did,
+                  toAgentId: args.peer,
+                  toAgentAuthorityDid: registered.did,
                   prompt: args.prompt,
                   conversationId,
                   messageId,
+                  fromAgent,
+                  contentOrigin: 'agent',
                 })
                 if (relayed.ok) {
-                  try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
+                  try { await recordExchange('self', args.prompt, `[agent:${fromAgent.label || fromAgent.agentId}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
                   return {
                     ok: true,
                     peer: args.peer,
@@ -2782,7 +2937,7 @@ ${text}`)
           if (response.error) return { ok: false, peer: args.peer, conversationId, error: `remote error ${response.error.code}: ${response.error.message}` }
           const result = response.result || {}
           const task = result.task
-          try { await recordExchange('self', args.prompt, `[agent:${state.alias}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
+          try { await recordExchange('self', args.prompt, `[agent:${fromAgent.label || fromAgent.agentId}]`, args.peer, threadMeta) } catch (e) { /* best-effort */ }
           const inbound = { conversationId, actorType: 'agent', origin: 'a2a' }
           if (!task) {
             const text = result.message ? partsText(result.message.parts) : ''
@@ -3421,6 +3576,289 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
     })()
     ctx.effect(() => () => { if (edgeHandle) edgeHandle.dispose() })
 
+    async function openConversationSession(conversation, peerLabel) {
+      const selection = ctx.agentDefaultModel.currentSelection()
+      const agentOptions = selection?.provider && selection?.model
+        ? { provider: selection.provider, model: selection.model }
+        : {}
+      const controller = makeAbortController()
+      let handle
+      let created = false
+      const bound = conversation.binding?.localSessionId
+      if (bound && typeof agents.resume === 'function') {
+        try { handle = await agents.resume({ resumeSessionId: bound, agentOptions, signal: controller.signal }) }
+        catch { /* A Conversation outlives a locally deleted Session. */ }
+      }
+      if (!handle) {
+        const sessionId = `iflow-${uid('agent')}`
+        handle = await agents.create({
+          sessionId,
+          meta: { cwd: workspace, origin: 'subagent' },
+          agentOptions,
+          signal: controller.signal,
+        })
+        bindSession(conversation, {
+          runtime: 'dsh', workspaceId: workspace,
+          localSessionId: handle.agent.session.id ?? sessionId, now: iso(),
+        })
+        created = true
+        await persistConversations()
+      }
+      if (created) {
+        try { ctx.sessionTitle.rename(handle.agent.session, peerLabel || conversation.peerAgentId || 'Agent') }
+        catch (error) { console.error('iFlow conversation title failed', error) }
+      }
+      return { handle, controller }
+    }
+
+    function appendWebHuman(session, text, messageId) {
+      session.append('user/message', {
+        id: messageId,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'plugin', plugin: 'iflow' },
+      }, { surfaceOp: 'append' })
+    }
+
+    function appendRemoteAgent(session, text, messageId) {
+      session.append('assistant/message', {
+        turn: 0,
+        step: 0,
+        message: {
+          id: messageId,
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { provider: 'iflow', model: 'remote-agent' },
+        },
+      }, { surfaceOp: 'append' })
+    }
+
+    function eventText(event) {
+      const message = event?.type === 'assistant/message' ? event.data?.message : event?.data
+      return Array.isArray(message?.content)
+        ? message.content.filter((block) => block?.type === 'text').map((block) => block.text ?? '').join('')
+        : ''
+    }
+
+    function privateMessages(conversation, events, cursor, limit) {
+      const all = events.flatMap((event, index) => {
+        if (event?.type !== 'user/message' && event?.type !== 'assistant/message') return []
+        const text = eventText(event)
+        if (!text) return []
+        const human = event.type === 'user/message'
+        return [{
+          index,
+          messageId: event.data?.id ?? event.data?.message?.id ?? `session-${index}`,
+          conversationId: conversation.conversationId,
+          authorAgentId: human ? conversation.localAgentId : conversation.peerAgentId,
+          authorLabel: human
+            ? (conversation.localAgentId || 'You')
+            : (conversation.peer || conversation.peerAgentId || 'Agent'),
+          contentOrigin: human ? 'human' : 'agent',
+          role: human ? 'human' : 'agent',
+          text,
+          createdAt: event.at ?? conversation.updatedAt,
+        }]
+      })
+      const requestedEnd = cursor === undefined ? all.length : Math.max(0, Math.min(Number(cursor) || 0, all.length))
+      const start = Math.max(0, requestedEnd - limit)
+      return {
+        messages: all.slice(start, requestedEnd).map(({ index: _index, ...message }) => message),
+        ...(start > 0 ? { previousCursor: String(start) } : {}),
+        nextCursor: String(requestedEnd),
+      }
+    }
+
+    async function sessionSnapshot(conversation, cursor, limit) {
+      if (!conversation.binding?.localSessionId) return { messages: [], nextCursor: '0' }
+      const opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
+      try { return privateMessages(conversation, opened.handle.agent.session.events ?? [], cursor, limit) }
+      finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
+    }
+
+    async function appendReplyToConversation(conversationId, text, messageId) {
+      await conversationsReady
+      const conversation = state.conversations[conversationId]
+      if (!conversation || !markSeen(conversation, `reply:${messageId}`)) return false
+      const opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
+      try { appendRemoteAgent(opened.handle.agent.session, text, messageId) }
+      finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
+      conversation.updatedAt = iso()
+      await persistConversations()
+      return true
+    }
+
+    async function executeWebConversationIntent({ intentId, ownAgentId, ownAgentAuthorityDid, intent }) {
+      await conversationsReady
+      const declarations = await loadDeclarations(ctx, join, workspace)
+      const fromAgent = declarations.agents.find((agent) => agent.agentId === ownAgentId && agent.did === ownAgentAuthorityDid)
+      if (!fromAgent) throw new IntentEnvelopeError('selected Agent identity or Authority is unavailable', 'agent_unavailable')
+
+      if (intent.kind === 'conversation.sync') {
+        if (!intent.conversationId && !intent.peerAgentId) {
+          const offset = Math.max(0, Number(intent.cursor) || 0)
+          const visible = Object.values(state.conversations)
+            .filter((candidate) => candidate.localAgentId === ownAgentId)
+            .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+          const page = visible.slice(offset, offset + intent.limit)
+          return {
+            ok: true,
+            views: [{
+              version: 1,
+              kind: 'conversation.list',
+              ownAgentId,
+              conversations: page.map((candidate) => ({
+                conversationId: candidate.conversationId,
+                peerAgentId: candidate.peerAgentId,
+                peerLabel: candidate.peer || candidate.peerAgentId || 'Agent',
+                mode: candidate.mode === 'assisted' ? 'assisted' : 'direct',
+                state: candidate.state,
+                updatedAt: candidate.updatedAt,
+              })),
+              ...(offset + page.length < visible.length ? { nextCursor: String(offset + page.length) } : {}),
+            }],
+          }
+        }
+        const conversation = intent.conversationId
+          ? state.conversations[intent.conversationId]
+          : findActiveConversation(state.conversations, ownAgentId, intent.peerAgentId)
+        if (!conversation || conversation.localAgentId !== ownAgentId) {
+          throw new IntentPolicyError('Conversation is not owned by the selected Agent', 'conversation_unavailable')
+        }
+        const snapshot = await sessionSnapshot(conversation, intent.cursor, intent.limit)
+        return {
+          ok: true,
+          conversationId: conversation.conversationId,
+          remoteAgentId: conversation.peerAgentId,
+          views: [{ version: 1, kind: 'conversation.snapshot', conversationId: conversation.conversationId, ...snapshot }],
+        }
+      }
+
+      if (intent.kind === 'conversation.draft.decide') {
+        const conversation = state.conversations[intent.conversationId]
+        if (!conversation || conversation.localAgentId !== ownAgentId) {
+          throw new IntentPolicyError('Draft is not owned by the selected Agent', 'draft_unavailable')
+        }
+        const draft = decideDraft(conversation, intent.draftId, intent.decision, iso())
+        if (!draft) throw new IntentPolicyError('Draft is missing, expired or already decided', 'draft_unavailable')
+        await persistConversations()
+        if (intent.decision === 'cancel') {
+          return {
+            ok: true, conversationId: conversation.conversationId, remoteAgentId: conversation.peerAgentId,
+            views: [{ version: 1, kind: 'conversation.status', conversationId: conversation.conversationId, state: 'cancelled' }],
+          }
+        }
+        const messageId = `msg-${intent.draftId}`
+        const outcome = await sendViaRelay({
+          peer: conversation.peer || conversation.peerAgentId,
+          toAgentId: conversation.peerAgentId,
+          toAgentAuthorityDid: conversation.peerAgentAuthorityDid,
+          prompt: draft.text,
+          conversationId: conversation.conversationId,
+          messageId,
+          fromAgent,
+          contentOrigin: 'agent',
+          originIntentId: draft.originIntentId,
+        })
+        if (!outcome?.ok) throw new Error(outcome?.error || 'Assisted draft could not be queued')
+        recordOutbound(conversation, { messageId, preview: draft.text, now: iso() })
+        await persistConversations()
+        return {
+          ok: true, state: 'sent', conversationId: conversation.conversationId,
+          remoteAgentId: conversation.peerAgentId,
+          views: [{ version: 1, kind: 'conversation.status', conversationId: conversation.conversationId, messageId, state: 'sending' }],
+        }
+      }
+
+      let conversation = intent.conversationId ? state.conversations[intent.conversationId] : undefined
+      if (!conversation && !intent.conversationId) {
+        conversation = findActiveConversation(state.conversations, ownAgentId, intent.targetAgentId)
+      }
+      const starting = !conversation
+      const conversationId = conversation?.conversationId ?? intent.conversationId ?? `conv-${uid('c')}`
+      conversation = resolveConversation(conversationId, {
+        peer: intent.targetAgentId,
+        peerDid: intent.targetAgentAuthorityDid,
+        localAgentId: ownAgentId,
+        localAgentAuthorityDid: ownAgentAuthorityDid,
+        peerAgentId: intent.targetAgentId,
+        peerAgentAuthorityDid: intent.targetAgentAuthorityDid,
+        mode: intent.mode,
+        preview: intent.text,
+        state: 'accepted',
+      })
+      if (conversation.localAgentId !== ownAgentId || conversation.peerAgentId !== intent.targetAgentId) {
+        throw new IntentPolicyError('Conversation participants cannot be changed', 'conversation_mismatch')
+      }
+      activateConversation(state.conversations, conversation)
+      if (starting) conversation.state = 'accepted'
+
+      const isNewIntent = markSeen(conversation, `intent:${intentId}`)
+      const opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
+      try {
+        if (intent.mode === 'assisted') {
+          if (!isNewIntent) throw new IntentPolicyError('Assisted Intent was already processed', 'duplicate_intent')
+          const before = opened.handle.agent.session.events?.length ?? 0
+          opened.handle.agent.followup({
+            id: intentId, role: 'user', content: [{ type: 'text', text: intent.text }],
+            source: { kind: 'plugin', plugin: 'iflow' },
+          })
+          await opened.handle.agent.whenIdle()
+          const generated = blocksToText(foldOutput((opened.handle.agent.session.events ?? []).slice(before)))
+          if (!generated) throw new Error('Own Agent produced no Assisted draft')
+          const draftId = uid('draft')
+          putDraft(conversation, {
+            draftId, text: generated, originIntentId: intentId,
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), now: iso(),
+          })
+          await persistConversations()
+          return {
+            ok: true, state: 'draft_pending', conversationId, remoteAgentId: intent.targetAgentId,
+            views: [
+              { version: 1, kind: 'conversation.bound', conversationId, peerAgentId: intent.targetAgentId },
+              { version: 1, kind: 'conversation.draft', conversationId, draftId, text: generated },
+              { version: 1, kind: 'conversation.status', conversationId, state: 'draft_pending' },
+            ],
+          }
+        }
+
+        if (isNewIntent) appendWebHuman(opened.handle.agent.session, intent.text, intentId)
+      } finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
+
+      const outcome = await sendViaRelay({
+        peer: intent.targetAgentId,
+        toAgentId: intent.targetAgentId,
+        toAgentAuthorityDid: intent.targetAgentAuthorityDid,
+        prompt: intent.text,
+        conversationId,
+        messageId: intentId,
+        fromAgent,
+        contentOrigin: 'human',
+        originIntentId: intentId,
+      })
+      if (!outcome?.ok) throw new Error(outcome?.error || 'Direct message could not be queued')
+      recordOutbound(conversation, { messageId: intentId, preview: intent.text, now: iso() })
+      await persistConversations()
+      await recordExchange('self', intent.text, `[agent:${fromAgent.label || fromAgent.agentId}]`, intent.targetAgentId, {
+        conversationId, messageId: intentId, actorType: 'human', origin: 'web_intent',
+      })
+      return {
+        ok: true, state: 'sent', conversationId, remoteAgentId: intent.targetAgentId,
+        views: [
+          { version: 1, kind: 'conversation.bound', conversationId, peerAgentId: intent.targetAgentId },
+          {
+            version: 1, kind: 'conversation.message', conversationId,
+            message: {
+              messageId: intentId, conversationId, authorAgentId: ownAgentId,
+              authorLabel: fromAgent.label || fromAgent.agentId, contentOrigin: 'human', role: 'human',
+              text: intent.text, createdAt: iso(), state: 'sending',
+            },
+          },
+          { version: 1, kind: 'conversation.status', conversationId, messageId: intentId, state: 'sending' },
+        ],
+      }
+    }
+
     // ── Human -> Own Agent: durable local half of the Web Intent plane ─────
     const webIntentFile = join(workspace, '.iflow', 'web-intents.json')
     const webIntentStore = {
@@ -3440,11 +3878,11 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
     webIntentQueue = new LocalIntentQueue({
       store: webIntentStore,
       clock: () => new Date(),
-      async isAgentAvailable(did) {
+      async isAgentAvailable(agentId, authorityDid) {
         const declarations = await loadDeclarations(ctx, join, workspace)
         // A declared Agent is the local authority boundary P0 can act through.
         // Missing means unavailable, so the ciphertext remains in Local Queue.
-        return declarations.agents.some((agent) => agent.did === did)
+        return declarations.agents.some((agent) => agent.agentId === agentId && agent.did === authorityDid)
       },
       crypto: {
         async open(did, sealed, aad) {
@@ -3481,19 +3919,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           return createHash('sha256').update(publicKey, 'utf8').digest('hex')
         },
       },
-      async sendConversation(message) {
-        const declarations = await loadDeclarations(ctx, join, workspace)
-        const fromAgent = declarations.agents.find((agent) => agent.did === message.fromAgentDid)
-        if (!fromAgent) return { ok: false, error: 'selected Agent is no longer declared on this Node' }
-        return sendViaRelay({
-          peer: message.toAgentDid,
-          toDid: message.toAgentDid,
-          prompt: message.text,
-          conversationId: message.conversationId,
-          messageId: message.messageId,
-          fromAgent,
-        })
-      },
+      executeIntent: executeWebConversationIntent,
       async postView(view) {
         const settings = relaySettings()
         if (!settings) throw new Error('Community connection is unavailable')

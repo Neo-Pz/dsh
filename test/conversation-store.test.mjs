@@ -13,14 +13,18 @@ const store = await import(
 )
 const {
   DEFAULT_TRUST,
+  activateConversation,
   bindSession,
   conversationsPath,
+  decideDraft,
+  findActiveConversation,
   loadConversations,
   loadTrust,
   markOutbound,
   markSeen,
   messageDigest,
   pendingOutbound,
+  putDraft,
   recordOutbound,
   newConversation,
   trustDecision,
@@ -144,6 +148,62 @@ describe('the session binding', () => {
   it('reads a corrupt store as empty rather than throwing into the A2A path', async () => {
     const ctx = fakeFs({ [conversationsPath(join, WORKSPACE)]: 'garbage' })
     assert.deepEqual(await loadConversations(ctx, join, WORKSPACE), { conversations: {} })
+  })
+})
+
+describe('the active Conversation pointer', () => {
+  const pair = (id) => newConversation(id, {
+    localAgentId: 'agent-local',
+    localAgentAuthorityDid: 'did:key:zLocal',
+    peerAgentId: 'agent-peer',
+    peerAgentAuthorityDid: 'did:key:zPeer',
+    state: 'accepted',
+  })
+
+  it('reuses the active thread for one Agent pair', () => {
+    const first = pair('conv-1')
+    assert.equal(findActiveConversation({ 'conv-1': first }, 'agent-local', 'agent-peer'), first)
+  })
+
+  it('moves the pointer without deleting the older Conversation', () => {
+    const first = pair('conv-1')
+    const second = pair('conv-2')
+    const conversations = { 'conv-1': first, 'conv-2': second }
+    activateConversation(conversations, second)
+    assert.equal(first.active, false)
+    assert.equal(second.active, true)
+    assert.equal(findActiveConversation(conversations, 'agent-local', 'agent-peer'), second)
+    assert.ok(conversations['conv-1'], 'history remains locally addressable')
+  })
+})
+
+describe('Assisted drafts', () => {
+  it('cannot send until a pending draft is explicitly confirmed', () => {
+    const conversation = newConversation('conv-1', { peer: 'agent-peer', state: 'accepted' })
+    putDraft(conversation, {
+      draftId: 'draft-1', text: 'Agent-authored proposal', originIntentId: 'intent-1',
+      expiresAt: '2026-08-27T01:00:00.000Z', now: '2026-08-27T00:00:00.000Z',
+    })
+    assert.equal(conversation.drafts[0].state, 'pending')
+    assert.equal(decideDraft(conversation, 'draft-1', 'confirm', '2026-08-27T00:10:00.000Z').state, 'confirmed')
+    assert.equal(decideDraft(conversation, 'draft-1', 'confirm', '2026-08-27T00:11:00.000Z'), null)
+  })
+
+  it('never confirms a cancelled or expired draft', () => {
+    const conversation = newConversation('conv-1', { peer: 'agent-peer' })
+    putDraft(conversation, {
+      draftId: 'cancelled', text: 'No', originIntentId: 'intent-1',
+      expiresAt: '2026-08-27T01:00:00.000Z', now: '2026-08-27T00:00:00.000Z',
+    })
+    assert.equal(decideDraft(conversation, 'cancelled', 'cancel', '2026-08-27T00:10:00.000Z').state, 'cancelled')
+    assert.equal(decideDraft(conversation, 'cancelled', 'confirm', '2026-08-27T00:11:00.000Z'), null)
+
+    putDraft(conversation, {
+      draftId: 'expired', text: 'Too late', originIntentId: 'intent-2',
+      expiresAt: '2026-08-27T00:20:00.000Z', now: '2026-08-27T00:00:00.000Z',
+    })
+    assert.equal(decideDraft(conversation, 'expired', 'confirm', '2026-08-27T00:21:00.000Z'), null)
+    assert.equal(conversation.drafts.find((draft) => draft.draftId === 'expired').state, 'expired')
   })
 })
 

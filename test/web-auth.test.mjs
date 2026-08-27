@@ -46,7 +46,7 @@ describe('Node-confirmed Web login payload', () => {
     }
     const agentBindings = [{
       agentId: 'alpha',
-      agentDid: 'did:key:zAlpha',
+      agentAuthorityDid: 'did:key:zAlpha',
       relationship: 'owned',
       right: 'send_as',
       scope: ['message'],
