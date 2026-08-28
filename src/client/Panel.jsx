@@ -99,13 +99,101 @@ function Claim({ claim, onCancel }) {
 
 /**
  * The session directory is a local operator decision, not an Agent fact.
- * DSH's picker is preferred because it validates on the host; direct entry is
- * retained for headless/older DSH installations where that optional UI service
- * is unavailable.  Saving never moves old sessions: each existing
+ * DSH composes either a browser directory flow or a native picker. The panel
+ * detects that capability instead of assuming the native API is usable; direct
+ * entry remains available when neither interaction service exists. Saving never moves old sessions: each existing
  * ConversationBinding keeps its original cwd.
  */
-function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, onPick }) {
+function pickerErrorCode(error) {
+  return error?.rpcError?.code ?? error?.code
+}
+
+function pickerCapability(error) {
+  return error?.rpcError?.details?.capability ?? error?.details?.capability
+}
+
+/** The in-app counterpart to DSH's browse capability. */
+function DirectoryBrowser({ picker, startPath, busy, onPicked, onCancel }) {
+  const [listing, setListing] = React.useState(null)
+  const [loading, setLoading] = React.useState(false)
+  const [error, setError] = React.useState(null)
+  const requestRef = React.useRef(0)
+
+  const load = React.useCallback(async (path) => {
+    if (typeof picker?.listDirectory !== 'function') {
+      setError('此 DSH 部署没有可用的目录浏览器；可以直接输入绝对路径。')
+      return
+    }
+    const request = requestRef.current + 1
+    requestRef.current = request
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await picker.listDirectory(path)
+      if (request !== requestRef.current) return
+      setListing(next)
+    } catch (cause) {
+      if (request !== requestRef.current) return
+      // `listDirectory` deliberately rejects under the native capability. In
+      // that case — and only that case — ask the OS picker for a path.
+      if (pickerErrorCode(cause) === 'directory-picker-unavailable'
+        && pickerCapability(cause) === 'native'
+        && typeof picker?.pickNativeDirectory === 'function') {
+        try {
+          const selected = await picker.pickNativeDirectory()
+          if (request !== requestRef.current) return
+          if (selected) await onPicked(selected)
+          else onCancel()
+          return
+        } catch (nativeCause) {
+          if (request === requestRef.current) setError(nativeCause?.message ?? '无法打开系统文件夹选择器。')
+          return
+        }
+      }
+      setError(cause?.message ?? '无法读取目录；可以直接输入绝对路径。')
+    } finally {
+      if (request === requestRef.current) setLoading(false)
+    }
+  }, [onCancel, onPicked, picker])
+
+  React.useEffect(() => {
+    void load(startPath || undefined)
+    return () => { requestRef.current += 1 }
+  }, [load, startPath])
+
+  const entries = (listing?.entries ?? []).filter((entry) => !entry.hidden)
+  return (
+    <div className="ifp-directory-browser" role="dialog" aria-label="选择会话工作目录">
+      <p className="ifp-muted">浏览 Host 上的目录，选择后新 Agent 对话会写入该文件夹。</p>
+      {listing ? (
+        <>
+          <div className="ifp-directory-crumbs">
+            {(listing.crumbs ?? []).map((crumb) => (
+              <button key={crumb.path} className="ifp-link" disabled={busy || loading} onClick={() => void load(crumb.path)}>{crumb.name || crumb.path}</button>
+            ))}
+          </div>
+          <p className="ifp-mono ifp-wrap">{listing.path}</p>
+          <div className="ifp-directory-list">
+            {entries.map((entry) => (
+              <button key={entry.path} className="ifp-directory-entry" disabled={busy || loading} onClick={() => void load(entry.path)}>{entry.name}</button>
+            ))}
+            {entries.length === 0 ? <p className="ifp-muted">这个文件夹没有可浏览的子文件夹。</p> : null}
+          </div>
+          <div className="ifp-actions">
+            <button className="ifp-btn primary" disabled={busy || loading} onClick={() => void onPicked(listing.path)}>选择此文件夹</button>
+            <button className="ifp-btn" disabled={busy || loading} onClick={onCancel}>取消</button>
+          </div>
+        </>
+      ) : null}
+      {loading ? <p className="ifp-muted">正在读取目录…</p> : null}
+      {error ? <p className="ifp-error">{error}</p> : null}
+    </div>
+  )
+}
+
+function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, picker }) {
   const [editing, setEditing] = React.useState(false)
+  const [browsing, setBrowsing] = React.useState(false)
   const [path, setPath] = React.useState(value ?? defaultValue ?? '')
   const [error, setError] = React.useState(null)
   const current = value ?? defaultValue ?? '—'
@@ -117,20 +205,20 @@ function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, o
     try {
       await onSave(next)
       setEditing(false)
+      return true
     } catch (cause) {
       setError(cause?.message ?? '工作目录保存失败，请重试。')
+      return false
     }
   }
 
-  const choose = async () => {
-    if (!onPick) return
+  const choose = () => {
+    if (!picker?.listDirectory && !picker?.pickNativeDirectory) return
     setError(null)
-    try {
-      const picked = await onPick()
-      if (picked) await save(picked)
-    } catch (cause) {
-      setError(cause?.message ?? '无法打开目录选择器；可以直接输入绝对路径。')
-    }
+  }
+
+  const picked = async (next) => {
+    if (await save(next)) setBrowsing(false)
   }
 
   return (
@@ -152,16 +240,17 @@ function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, o
       ) : (
         <div className="ifp-actions">
           {!confirmed ? <button className="ifp-btn primary" disabled={busy} onClick={() => save(defaultValue)}>使用默认工作区</button> : null}
-          {onPick ? <button className="ifp-btn" disabled={busy} onClick={choose}>选择文件夹</button> : null}
+          {picker?.listDirectory || picker?.pickNativeDirectory ? <button className="ifp-btn" disabled={busy} onClick={() => { choose(); setBrowsing(true) }}>选择文件夹</button> : null}
           <button className="ifp-btn" disabled={busy} onClick={() => setEditing(true)}>{confirmed ? '修改路径' : '输入路径'}</button>
         </div>
       )}
+      {browsing ? <DirectoryBrowser picker={picker} startPath={value ?? defaultValue} busy={busy} onPicked={picked} onCancel={() => setBrowsing(false)} /> : null}
       {error ? <p className="ifp-error">{error}</p> : null}
     </Card>
   )
 }
 
-export function IFlowPanel({ state, onChanged, pickWorkspace }) {
+export function IFlowPanel({ state, onChanged, workspacePicker }) {
   const [error, setError] = React.useState(null)
   const [stage, setStage] = React.useState('idle') // idle | consent | claiming
   const [claim, setClaim] = React.useState(null)
@@ -258,7 +347,7 @@ export function IFlowPanel({ state, onChanged, pickWorkspace }) {
         defaultValue={conversationWorkspace.defaultPath ?? state.workspaceRoot}
         confirmed={conversationWorkspace.confirmed === true}
         busy={busy}
-        onPick={pickWorkspace}
+        picker={workspacePicker}
         onSave={(path) => act(async () => {
           const result = await api.setConversationWorkspace(path)
           if (!result.ok) throw new Error(result.error ?? '工作目录保存失败')

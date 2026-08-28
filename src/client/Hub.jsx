@@ -64,7 +64,7 @@ function Transactions() {
   )
 }
 
-export function IFlowHub({ pickWorkspace } = {}) {
+export function IFlowHub({ workspacePicker } = {}) {
   const [state, setState] = React.useState(null)
   const [error, setError] = React.useState(null)
   const [tab, setTab] = React.useState(null)
@@ -152,7 +152,7 @@ export function IFlowHub({ pickWorkspace } = {}) {
       {active === 'agents' ? <AgentsTab state={state} /> : null}
       {active === 'network' ? <NetworkMap /> : null}
       {active === 'transactions' ? <Transactions /> : null}
-      {active === 'me' ? <IFlowPanel state={state} onChanged={refresh} pickWorkspace={pickWorkspace} /> : null}
+      {active === 'me' ? <IFlowPanel state={state} onChanged={refresh} workspacePicker={workspacePicker} /> : null}
 
       {error ? <div className="ifp-error">{error}</div> : null}
     </div>

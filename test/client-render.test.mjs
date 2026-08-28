@@ -97,6 +97,28 @@ let dom
 let slots
 let container
 let root
+let nativePickerCalls = 0
+const browseCalls = []
+
+const DIRECTORY_LISTINGS = {
+  'F:/work': {
+    path: 'F:/work',
+    home: 'F:/work',
+    crumbs: [{ name: 'work', path: 'F:/work', hidden: false }],
+    entries: [{ name: 'agent-chats', path: 'F:/work/agent-chats', hidden: false }],
+    truncated: false,
+  },
+  'F:/work/agent-chats': {
+    path: 'F:/work/agent-chats',
+    home: 'F:/work',
+    crumbs: [
+      { name: 'work', path: 'F:/work', hidden: false },
+      { name: 'agent-chats', path: 'F:/work/agent-chats', hidden: false },
+    ],
+    entries: [],
+    truncated: false,
+  },
+}
 
 /** Let effects and their fetches settle. */
 async function settle(times = 6) {
@@ -177,6 +199,18 @@ before(() => {
       register: (spec, Component) => {
         slots.set(spec.name, Component)
         return () => {}
+      },
+    },
+    workspaces: {
+      listDirectory: async (path) => {
+        browseCalls.push(path)
+        return DIRECTORY_LISTINGS[path ?? 'F:/work']
+      },
+      // This deployment deliberately serves browse, exactly the configuration
+      // that used to fail when iFlow called the native-only API first.
+      pickDirectory: async () => {
+        nativePickerCalls += 1
+        throw new Error('host.pickDirectory needs the native capability')
       },
     },
   })
@@ -274,6 +308,30 @@ describe('the Hub', () => {
     assert.match(container.textContent, /node-1/)
     assert.match(container.textContent, /F:\/work/)
     assert.match(container.textContent, /新对话需要你同意/)
+  })
+
+  it('uses the Host browse capability for a conversation folder before native picking', async () => {
+    const previous = responses['/iflow/panel/state']
+    responses['/iflow/panel/state'] = baseState({
+      conversationsPending: 0,
+      conversationWorkspace: { path: 'F:/work', defaultPath: 'F:/work', confirmed: false },
+    })
+    nativePickerCalls = 0
+    browseCalls.length = 0
+    try {
+      await mount(slots.get('settings.section'))
+      const choose = [...container.querySelectorAll('button')].find((button) => button.textContent === '选择文件夹')
+      assert.ok(choose, 'the local workspace control should offer the composed picker')
+      await React.act(async () => {
+        choose.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      })
+      await settle()
+      assert.deepEqual(browseCalls, ['F:/work'])
+      assert.equal(nativePickerCalls, 0, 'browse deployments must not call the native-only API')
+      assert.match(container.textContent, /agent-chats/)
+    } finally {
+      responses['/iflow/panel/state'] = previous
+    }
   })
 
   it('requires an explicit confirmation before migrating a legacy Principal', async () => {
