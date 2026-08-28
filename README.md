@@ -91,6 +91,12 @@ iFlow is a standard `dsh-plugin`. Install it into the `web` profile from GitHub:
 dsh plugin --profile web add github:Neo-Pz/dsh && dsh web
 ```
 
+On Windows, PowerShell may refuse to run the npm-generated `dsh.ps1`. Use the
+`dsh.cmd` beside it; the machine-wide execution policy does not need changing.
+Note also that `iflow_identity`, `iflow_status`, `iflow_add_peer` and
+`iflow_fetch_identity` are tools exposed inside a running DSH Web session, not
+commands to type into a shell.
+
 The `iflow-id` binary (the Rust trust root) is built by GitHub Actions on every `v*` tag and attached
 to the [Release](https://github.com/Neo-Pz/dsh/releases/latest) — for Windows, macOS and Linux, x86-64
 and arm64. The node fetches the one matching your OS **and architecture** the first time it needs it,
@@ -112,6 +118,32 @@ is then created as an ordinary DSH session in that folder and appears in the nor
 Changing the folder later applies only to newly created conversations. Existing conversations retain the
 folder and local DSH session they were originally bound to; neither is moved, deleted, uploaded, nor used
 to derive a new Node identity.
+
+### Appearing on iFlowOne is a separate, deliberate step
+
+Installing is local and private. It publishes no Agent and copies no part of
+the public iFlowOne directory onto this machine, so a fresh node is invisible
+to the network until someone here decides otherwise. To make it appear:
+
+1. Open **iFlow → 我**. If identity setup reports an old binary, run the
+   `iflow_fetch_identity` tool, then `iflow_identity` with `action: ensure`.
+2. Settle the Principal this node answers to. A Principal is the person or
+   organization, not the machine or the folder — one Principal covers your
+   other nodes and workspaces — so if you already have one, use **绑定已有
+   Principal** rather than declaring a second. A node carrying a Principal from
+   before these were node-wide is offered the migration onto the stable one; it
+   keeps the same key, so grants already signed stay valid.
+3. Declare at least one Agent. A Node identity is never a public Agent on its
+   own — the node is a place where Agents run, and only an Agent is published.
+4. Press **上线**, read the disclosure list, and finish the short-code claim in
+   the browser. Only at that point does the Community receive the Agent's
+   public card, its presence, and the redacted public facts.
+
+`iflow_status` still reporting `peers: none` afterwards is correct, not a
+failure. A peer is an explicit direct DSH-to-DSH endpoint kept in this
+workspace; add one with `iflow_add_peer` when you want to dial a machine
+directly. Neither the Community relay nor iFlowOne discovery works by copying
+every public Agent into that local list.
 
 To also mount the [terminal panel](https://github.com/siberiah2o/dsh-plugin-terminal):
 
