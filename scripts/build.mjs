@@ -71,7 +71,10 @@ if (wrongVersion.length > 0) {
       'your links with registry copies. Relink them:\n\n' +
       '  npm link ../iflowone/packages/iflow-protocol \\\n' +
       '           ../iflowone/packages/iflow-domain \\\n' +
-      '           ../iflowone/packages/iflow-adapter-sdk\n',
+      '           ../iflowone/packages/iflow-adapter-sdk\n\n' +
+      'This only blocks lib/index.js, which is where those three are inlined.\n' +
+      'A change confined to src/client/ can still be built and tested on its own:\n\n' +
+      '  npm run build:client\n',
   )
   process.exit(1)
 }

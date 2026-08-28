@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "build:client": "node scripts/build-client.mjs"
   },
   "dsh": {
     "bundle": {

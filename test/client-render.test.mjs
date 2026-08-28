@@ -272,6 +272,56 @@ describe('the Hub', () => {
     assert.match(container.textContent, /拒绝/)
   })
 
+  it('does not say there is nothing to do above a list of things', async () => {
+    // The screenshot case: no conversation is waiting on a person, but several
+    // exist. The card's title answers "is anything waiting on me" while the
+    // list below it shows every conversation, so "所有对话都已经答复过了" on its
+    // own read as a contradiction — nothing to handle, followed by items.
+    responses['/iflow/panel/state'] = baseState({ conversationsPending: 0 })
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [
+        { ...PENDING_CONVERSATION, conversationId: 'conv-a', state: 'accepted', peer: 'weww', preview: 'hi' },
+        { ...PENDING_CONVERSATION, conversationId: 'conv-b', state: 'accepted', peer: 'if-dsk', preview: '双向回执' },
+      ],
+    }
+    await mount(slots.get('settings.section'))
+    // With nothing waiting the Hub opens elsewhere, which is correct — but it
+    // means this tab has to be asked for.
+    await clickTab('待处理')
+
+    assert.match(container.textContent, /没有待处理的事/)
+    assert.match(container.textContent, /以下是全部 2 条对话/, 'the list is never introduced')
+    // Still actually listing them, which is the whole reason the sentence is needed.
+    assert.match(container.textContent, /weww/)
+    assert.match(container.textContent, /if-dsk/)
+
+    responses['/iflow/panel/state'] = baseState()
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
+  it('counts the whole list, not the part that is waiting', async () => {
+    // With one pending among three, the heading counts 1 and the sentence
+    // counts 3. Conflating them is the same defect wearing different numbers.
+    responses['/iflow/panel/state'] = baseState({ conversationsPending: 1 })
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [
+        PENDING_CONVERSATION,
+        { ...PENDING_CONVERSATION, conversationId: 'conv-c', state: 'accepted', peer: 'x' },
+        { ...PENDING_CONVERSATION, conversationId: 'conv-d', state: 'closed', peer: 'y' },
+      ],
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('待处理')
+
+    assert.match(container.textContent, /1 条等你答复/)
+    assert.match(container.textContent, /以下是全部 3 条对话，待答复的排在前面/)
+
+    responses['/iflow/panel/state'] = baseState()
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
   it('shows peers and declared Agents', async () => {
     await mount(slots.get('settings.section'))
     await clickTab('Agents')
