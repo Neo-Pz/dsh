@@ -55,6 +55,18 @@ export const inject = ['slots', 'workspaces']
 export function apply(ctx) {
   const disposeStyles = insertStyles()
   const openState = createOpenState()
+  // A DSH deployment composes exactly one directory-picker capability.  Do
+  // not call `pickDirectory` optimistically: it is native-only and throws on
+  // a browser-backed host.  The panel tries `listDirectory` first and falls
+  // back to this native method only when the Host explicitly reports native.
+  const workspacePicker = Object.freeze({
+    listDirectory: typeof ctx.workspaces?.listDirectory === 'function'
+      ? (path, signal) => ctx.workspaces.listDirectory(path, signal)
+      : undefined,
+    pickNativeDirectory: typeof ctx.workspaces?.pickDirectory === 'function'
+      ? () => ctx.workspaces.pickDirectory()
+      : undefined,
+  })
 
   function LauncherEntry(props) {
     return <IFlowLauncher wide={props.wide} onOpen={() => openState.set(true)} />
@@ -64,7 +76,7 @@ export function apply(ctx) {
     const open = useOpen(openState)
     return (
       <IFlowOverlay open={open} onClose={() => openState.set(false)}>
-        <IFlowHub pickWorkspace={() => ctx.workspaces?.pickDirectory?.()} />
+        <IFlowHub workspacePicker={workspacePicker} />
       </IFlowOverlay>
     )
   }
@@ -87,7 +99,7 @@ export function apply(ctx) {
         // than freezing whatever was current at registration.
         label: () => 'iFlow · 弗流',
       },
-      () => <IFlowHub pickWorkspace={() => ctx.workspaces?.pickDirectory?.()} />,
+      () => <IFlowHub workspacePicker={workspacePicker} />,
     ),
   )
 
