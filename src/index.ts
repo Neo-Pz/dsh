@@ -3251,6 +3251,47 @@ ${text}`)
           apply: { type: 'boolean', description: 'Write the repairs. Default false — report only.' },
           sessionId: { type: 'string', description: 'Limit to one session id. Omit to scan every session store.' },
         },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              applied: { type: 'boolean' },
+              summary: { type: 'string' },
+              error: { type: 'string' },
+              sessions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    sessionId: { type: 'string' },
+                    workspace: { type: 'string' },
+                    findings: { type: 'array', items: { type: 'string' } },
+                    repairable: { type: 'integer' },
+                    repaired: { type: 'array', items: { type: 'integer' } },
+                    error: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          render: (_args, value) => [
+            {
+              type: 'text',
+              text: value.ok
+                ? `${value.summary}${value.applied ? '' : ' (report only; pass apply: true to fix, a .backup is written first)'}` +
+                  (value.sessions ?? [])
+                    .map((entry) => {
+                      const lines = (entry.findings ?? []).join('\n  ')
+                      return `\n\n${entry.sessionId} (${entry.workspace})\n  ${lines}`
+                    })
+                    .join('')
+                : `could not scan: ${value.error}`,
+            },
+          ],
+        },
         async handler(args) {
           const { readdirSync, existsSync, statSync, readFileSync, writeFileSync, copyFileSync } = await import('node:fs')
           const { join: joinPath } = await import('node:path')
