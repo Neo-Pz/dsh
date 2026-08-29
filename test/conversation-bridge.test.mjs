@@ -46,6 +46,7 @@ function createHost(workspace, { resumeFails = false } = {}) {
   const tools = new Map()
   const created = []
   const resumed = []
+  const followups = []
   let counter = 0
 
   const makeHandle = (sessionId) => {
@@ -53,6 +54,9 @@ function createHost(workspace, { resumeFails = false } = {}) {
     const agent = {
       session: { id: sessionId, header: { meta: {} }, events },
       followup(message) {
+        // Kept, not discarded: the id and the authorship the plugin puts here
+        // are the thing several tests are about.
+        followups.push({ sessionId, message })
         const text = (message.content ?? []).map((b) => b.text ?? '').join('')
         events.push({
           type: 'assistant/message',
@@ -171,7 +175,7 @@ function createHost(workspace, { resumeFails = false } = {}) {
       handler(req, res).catch(reject)
     })
 
-  return { ctx, routes, tools, created, resumed, post }
+  return { ctx, routes, tools, created, resumed, followups, post }
 }
 
 /** Send one A2A message and return the resulting Task. */
@@ -529,6 +533,82 @@ describe('work done for another Principal', () => {
           `${type} carries the request text`,
         )
       }
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+describe('one network message, one id', () => {
+  it('keeps the sender’s messageId on the receiving machine', async () => {
+    // Minting a fresh id here made the two ends unable to recognise the same
+    // message: no cross-node deduplication, no pairing a reply with what it
+    // answered, and no chance of two sessions being views of one thread.
+    const { host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const task = await sendMessage(host, { text: 'analyse this', messageId: 'msg-from-the-sender' })
+      await waitFor(async () => (await getTask(host, task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+
+      const handed = host.followups.at(-1)
+      assert.ok(handed, 'nothing was handed to the local agent')
+      assert.equal(handed.message.id, 'msg-from-the-sender', 'the receiving machine minted its own id')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('records that the far side wrote it, not this machine', async () => {
+    // A peer's message landing as an ordinary local user turn is exactly
+    // backwards, and it is what the read path used to infer from the type.
+    const { host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const task = await sendMessage(host, { text: 'hello', from: 'if-lt-b' })
+      await waitFor(async () => (await getTask(host, task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+
+      const marked = host.followups.at(-1)?.message?.iflow
+      assert.ok(marked, 'no authorship was recorded')
+      assert.equal(marked.side, 'peer')
+      assert.equal(marked.authorLabel, 'if-lt-b')
+      assert.equal(marked.represents, 'if-lt-b')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('marks a person on the far side as a person, still on the far side', async () => {
+    // side and author answer different questions. A human message from the peer
+    // is a human message AND a peer message; neither answer implies the other.
+    const { host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const task = await sendMessage(host, {
+        text: 'typed by a person over there',
+        metadata: { contentOrigin: 'human' },
+      })
+      await waitFor(async () => (await getTask(host, task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+
+      const marked = host.followups.at(-1)?.message?.iflow
+      assert.equal(marked.author, 'human')
+      assert.equal(marked.side, 'peer')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('still accepts a peer that sends no id at all', async () => {
+    // An older node, not a hostile one. It gets an id minted here rather than
+    // being refused.
+    const { host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const { json } = await host.post('/a2a', {
+        jsonrpc: '2.0', id: 'r', method: 'SendMessage',
+        params: {
+          message: { role: 'ROLE_USER', parts: [{ text: 'no id here', mediaType: 'text/plain' }] },
+          configuration: { returnImmediately: true },
+          metadata: { from: 'old-peer' },
+        },
+      })
+      await waitFor(async () => (await getTask(host, json.result.task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+      assert.match(host.followups.at(-1).message.id, /^(iflow-)?msg-/)
     } finally {
       await cleanup()
     }

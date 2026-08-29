@@ -736,7 +736,10 @@ export default {
             messageId,
             contentOrigin,
             originIntentId,
-            actorType: 'agent',
+            // Who produced the words, carried honestly rather than flattened to
+            // `agent`. The Agent is always the network actor; that is a
+            // different fact and it is `fromAgentId` above.
+            actorType: contentOrigin === 'human' ? 'human' : 'agent',
             origin: originIntentId ? 'web_intent' : 'agent',
             principalId: state.principalId ?? undefined,
             // So the recipient can tell how this arrived. It changes nothing
@@ -1698,9 +1701,28 @@ ${text}`)
       let outputBlocks = []
       try {
         child.followup({
-          id: `iflow-${uid('msg')}`,
+          // The id the SENDER minted, not a fresh one.
+          //
+          // One network message, one id, on both machines. Minting a second
+          // here made the two ends unable to recognise the same message: no
+          // cross-node deduplication, no way to pair a reply with what it
+          // answered, and no way for two sessions to be views of one thread.
+          //
+          // Falls back to a new id only for a peer that sent none, which is an
+          // old node rather than a hostile one.
+          id: thread.messageId || `iflow-${uid('msg')}`,
           role: 'user',
           content: [{ type: 'text', text }],
+          // The far side wrote this. `kind: 'user'` is what DSH needs to
+          // persist it; who it was is recorded beside it, because a peer's
+          // message landing as an ordinary local user turn is exactly backwards.
+          iflow: authorship({
+            author: thread.actorType === 'human' ? 'human' : 'agent',
+            authorAgentId: thread.peerAgentId ?? null,
+            authorLabel: from ?? thread.peerAgentId ?? null,
+            represents: thread.peerAgentId ?? null,
+            side: 'peer',
+          }),
           source: { kind: 'user' },
         })
         await child.whenIdle()
@@ -2015,6 +2037,8 @@ ${text}`)
         actorType,
         origin,
         localAgentLabel: toAgentId,
+        // Who is on the other end of this, for the authorship record.
+        peerAgentId: typeof metadata.fromAgentId === 'string' ? metadata.fromAgentId : from,
       })
       state.outgoing.get(taskId).done = done
       done.catch((err) => console.error(`iFlow task ${taskId} unhandled run error`, err))
