@@ -237,6 +237,29 @@ export function findActiveConversation(conversations, localAgentId, peerAgentId)
   )
 }
 
+/**
+ * The open thread with a peer named the way an outbound send names them.
+ *
+ * `findActiveConversation` matches on the peer's Agent id, which an inbound
+ * message carries and an outbound one often does not: `iflow_send` is given a
+ * registered peer name or a URL, and the Agent id only becomes known once the
+ * far side answers. `newConversation` stores that name in both `peer` and
+ * `peerAgentId`, so matching either is what finds the thread the person means.
+ *
+ * `localAgentId` is null on threads opened before outbound sends recorded it;
+ * those still match, because refusing to reuse them would leave exactly the
+ * pile of duplicates this exists to prevent.
+ */
+export function findConversationWithPeer(conversations, localAgentId, peer) {
+  if (!peer) return undefined
+  return Object.values(conversations).find((conversation) =>
+    conversation.active !== false &&
+    (conversation.peer === peer || conversation.peerAgentId === peer) &&
+    (conversation.localAgentId == null || localAgentId == null || conversation.localAgentId === localAgentId) &&
+    conversation.state !== 'closed' && conversation.state !== 'rejected',
+  )
+}
+
 export function activateConversation(conversations, conversation) {
   for (const candidate of Object.values(conversations)) {
     if (candidate.conversationId === conversation.conversationId) continue
