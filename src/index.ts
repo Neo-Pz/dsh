@@ -50,6 +50,9 @@ import {
   decideDraft,
   findActiveConversation,
   findConversationWithPeer,
+  recordDelivery,
+  decideDelivery,
+  pendingDeliveries,
   loadConversations,
   markOutbound,
   pendingOutbound,
@@ -375,6 +378,28 @@ export default {
     }
 
     /** This node's own agent id in the network, matching the edge descriptor. */
+    /**
+     * A remote Agent handed work back. Record that a ruling is owed.
+     *
+     * Deliberately not a ruling: the far side finishing is a Delivery, and
+     * accepting it is a separate act by the party that asked. Recording it here
+     * is what gives a person somewhere to accept or send back from, and what
+     * stops the answer arriving and being treated as settled by its arrival.
+     *
+     * The digest, never the text — the answer is already in the bound session,
+     * which is where it is read.
+     */
+    function noteDelivery(conversation, task, text) {
+      if (!conversation || !task || task.status?.state !== 'TASK_STATE_COMPLETED' || !text) return
+      recordDelivery(conversation, {
+        deliveryId: `del-${task.id}`,
+        taskId: task.id,
+        digest: messageDigest(text),
+        now: iso(),
+      })
+      void persistConversations()
+    }
+
     function selfAgentId() {
       return edgeHandle ? edgeHandle.edge.descriptor.selfAgentId : `node-${state.alias}`
     }
@@ -1674,7 +1699,25 @@ ${text}`)
             parts: [{ text: textOut, mediaType: 'text/plain' }],
           }]
         }
+        // A2A says completed and keeps saying it: that is what the sender's
+        // GetTask poll is waiting on, and changing it would hang every peer.
+        // What the journal records is narrower and truer — the work was handed
+        // back, and nobody has ruled on it.
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
+        observeEdge('delivery.submitted', (observer) =>
+          observer.deliverySubmitted({
+            taskId,
+            deliveryId: `del-${taskId}`,
+            // The declared Agent that answered, which is the one that may not
+            // rule on this. `toAgentId` belongs to the request handler's scope,
+            // not this one.
+            byAgentId: conversation?.localAgentId ?? selfAgentId(),
+            outputs: [{ kind: 'artifact', id: task.artifacts[0].artifactId, summary: 'Final answer' }],
+            // A digest, never the answer. The requester holds the text and can
+            // check it against this; nobody else learns anything from it.
+            evidence: [messageDigest(textOut)],
+          }),
+        )
         // The reply is this Agent speaking, on the same thread the request
         // arrived on, addressed back to whoever asked.
         await recordExchange('self', textOut, `[agent:${thread.localAgentLabel || conversation?.localAgentId || 'Agent'}]`, from, {
@@ -1809,6 +1852,45 @@ ${text}`)
           grantRef: grant ? grant.grantId : undefined,
         }),
       )
+      // Someone else's Principal asked this node to do work.
+      //
+      // Journalled as a Task delegated ACROSS an ownership boundary, which is
+      // what makes the fold refuse to let this node call the work finished on
+      // its own say-so later. Within one Principal an Agent finishing its own
+      // work ends the matter; here there is a counterparty, and the whole
+      // point of P3 is that they get to disagree.
+      //
+      // `crossesOwnershipBoundary` is stated rather than inferred because only
+      // this side knows: the request arrived from another node, and
+      // `Agent.principal` is not populated anywhere yet.
+      if (fresh) {
+        // `toAgentId` is only set when the sender named an Agent on this node;
+        // most requests do not, and passing it through undefined put an Agent
+        // with no id into the fold, which then broke every projection on a
+        // sort. Whoever answers is this node's own Agent when nobody was named.
+        const respondingAgentId = toAgentId || selfAgentId()
+        observeEdge('task.created', (observer) =>
+          observer.taskCreated({
+            taskId,
+            // Deliberately not an excerpt of the request. `task.*` and
+            // `delivery.*` are publishable — unlike `conversation.*`, which the
+            // outbox filter blocks structurally — so anything put here goes to
+            // the Community. The peer is already named by
+            // `a2a.request_received`; the words are not ours to forward.
+            title: `Request from ${from}`,
+            ownerAgentId: respondingAgentId,
+          }),
+        )
+        observeEdge('task.delegated', (observer) =>
+          observer.taskDelegated({
+            taskId,
+            toAgentId: respondingAgentId,
+            fromAgentId: from,
+            grantRef: grant ? grant.grantId : undefined,
+            crossesOwnershipBoundary: true,
+          }),
+        )
+      }
       const configuration = params && params.configuration ? params.configuration : {}
       if (!fresh) {
         // Already handled. Answer with the task as it stands rather than
@@ -3026,6 +3108,7 @@ ${text}`)
           if (TERMINAL_TASK_STATES.has(task.status.state)) {
             const text = taskText(task)
             if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
+            noteDelivery(outbound, task, text)
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
@@ -3071,6 +3154,7 @@ ${text}`)
           }
           const text = taskText(finalTask)
           if (text.length > 0) try { await recordExchange('remote', text, `[${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
+          noteDelivery(outbound, finalTask, text)
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,
@@ -4229,6 +4313,12 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
               state: c.state,
               preview: c.preview,
               boundSession: c.binding ? c.binding.localSessionId : null,
+              // Deliveries still owed a ruling, so the panel can offer the
+              // decision on the thread it belongs to. Digest and timing only:
+              // the answer is read in the bound session, not here.
+              deliveries: (c.deliveries ?? [])
+                .filter((d) => d.state === 'pending')
+                .map((d) => ({ deliveryId: d.deliveryId, taskId: d.taskId, receivedAt: d.receivedAt })),
               createdAt: c.createdAt,
               updatedAt: c.updatedAt,
             })),
@@ -4243,6 +4333,52 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       async rejectConversation(conversationId, reason) {
         if (!conversationId) return { ok: false, error: 'conversationId is required' }
         return await rejectConversation(conversationId, reason)
+      },
+
+      /**
+       * Rule on work a remote Agent handed back.
+       *
+       * The journal fact is what makes this binding: until one is written, a
+       * Task delegated across an ownership boundary stays `delivered`, however
+       * the executor described it. `decidedBy` is this node's Agent, which is
+       * necessarily not the one that submitted — the fold refuses a
+       * self-acceptance, and here the two are on different machines.
+       */
+      async decideDelivery(conversationId, deliveryId, decision, reason) {
+        await conversationsReady
+        if (!conversationId || !deliveryId) return { ok: false, error: 'conversationId and deliveryId are required' }
+        if (decision !== 'accept' && decision !== 'reject') {
+          return { ok: false, error: 'decision must be "accept" or "reject"' }
+        }
+        if (decision === 'reject' && !reason) {
+          // Sending work back without saying why leaves the far side nothing to
+          // act on, and the domain requires a reason for exactly that reason.
+          return { ok: false, error: 'rejecting a delivery needs a reason' }
+        }
+        const conversation = state.conversations[conversationId]
+        if (!conversation) return { ok: false, error: 'no such conversation' }
+        const ruled = decideDelivery(conversation, deliveryId, decision, iso())
+        if (!ruled) return { ok: false, error: 'no delivery awaiting a decision' }
+        await persistConversations()
+
+        const decidedBy = conversation.localAgentId ?? selfAgentId()
+        observeEdge(`delivery.${ruled.state}`, (observer) =>
+          decision === 'accept'
+            ? observer.deliveryAccepted({
+                taskId: ruled.taskId,
+                deliveryId,
+                decidedBy,
+                decidedByKind: 'human',
+              })
+            : observer.deliveryRejected({
+                taskId: ruled.taskId,
+                deliveryId,
+                decidedBy,
+                decidedByKind: 'human',
+                reason,
+              }),
+        )
+        return { ok: true, delivery: ruled }
       },
 
       async declareAgent(input) {
@@ -4349,6 +4485,16 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           // The badge reads this. Because the Launcher already polls /state,
           // showing "someone is waiting" costs no additional request.
           conversationsPending: pendingConversationCount(),
+          // Work handed back to this node and still owed a ruling. A separate
+          // queue from pending conversations: agreeing to talk and agreeing the
+          // work is done are different decisions, made at different times.
+          deliveriesPending: pendingDeliveries(state.conversations).map(({ conversation, delivery }) => ({
+            conversationId: conversation.conversationId,
+            deliveryId: delivery.deliveryId,
+            taskId: delivery.taskId,
+            peerLabel: conversation.peer || conversation.peerAgentId || 'agent',
+            receivedAt: delivery.receivedAt,
+          })),
           // Whether this node can reach a peer it cannot dial, and if not, why.
           // An identity binary older than the plugin is the likely answer, and
           // it is not something an operator would otherwise find out until a

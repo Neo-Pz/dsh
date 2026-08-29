@@ -160,6 +160,7 @@ function normalize(id, value) {
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
     seenMessageIds: Array.isArray(value.seenMessageIds) ? value.seenMessageIds.slice(-SEEN_LIMIT) : [],
     outbound: Array.isArray(value.outbound) ? value.outbound.slice(-OUTBOUND_LIMIT) : [],
+    deliveries: Array.isArray(value.deliveries) ? value.deliveries.slice(-DELIVERY_LIMIT) : [],
     drafts: Array.isArray(value.drafts) ? value.drafts.slice(-DRAFT_LIMIT) : [],
   }
 }
@@ -170,6 +171,8 @@ const SEEN_LIMIT = 200
 /** How many sent-message receipts a thread keeps. */
 const OUTBOUND_LIMIT = 50
 
+/** How many Deliveries a thread keeps a ruling record for. */
+const DELIVERY_LIMIT = 50
 const DRAFT_LIMIT = 20
 
 /**
@@ -220,6 +223,7 @@ export function newConversation(id, {
     updatedAt: at,
     seenMessageIds: [],
     outbound: [],
+    deliveries: [],
     drafts: [],
   }
 }
@@ -308,6 +312,52 @@ export function putDraft(conversation, { draftId, text, originIntentId, expiresA
   if (conversation.drafts.length > DRAFT_LIMIT) conversation.drafts.splice(0, conversation.drafts.length - DRAFT_LIMIT)
   conversation.updatedAt = at
   return conversation.drafts.at(-1)
+}
+
+/**
+ * A remote Agent handed work back, and nobody here has ruled on it.
+ *
+ * Kept per Conversation rather than globally because ruling on a Delivery is a
+ * decision about a counterparty, and the thread is where a person can see what
+ * was asked. The answer text is NOT stored here — it is already in the bound
+ * DSH session, which is where a person reads it; this records that a decision
+ * is owed, and what it is owed about.
+ */
+export function recordDelivery(conversation, { deliveryId, taskId, digest, now }) {
+  const at = now ?? new Date().toISOString()
+  conversation.deliveries = (conversation.deliveries ?? []).filter((d) => d.deliveryId !== deliveryId)
+  conversation.deliveries.push({ deliveryId, taskId, digest, state: 'pending', receivedAt: at })
+  if (conversation.deliveries.length > DELIVERY_LIMIT) {
+    conversation.deliveries.splice(0, conversation.deliveries.length - DELIVERY_LIMIT)
+  }
+  conversation.updatedAt = at
+  return conversation.deliveries.at(-1)
+}
+
+/**
+ * Accept or send back. Idempotent and one-way: a Delivery already ruled on
+ * stays ruled on, because re-deciding would let a later poll or a stray click
+ * overturn something the counterparty has already been told.
+ */
+export function decideDelivery(conversation, deliveryId, decision, now) {
+  const delivery = (conversation.deliveries ?? []).find((d) => d.deliveryId === deliveryId)
+  if (!delivery || delivery.state !== 'pending') return null
+  if (decision !== 'accept' && decision !== 'reject') return null
+  delivery.state = decision === 'accept' ? 'accepted' : 'rejected'
+  delivery.decidedAt = now ?? new Date().toISOString()
+  conversation.updatedAt = delivery.decidedAt
+  return delivery
+}
+
+/** Every Delivery still owed a ruling, newest first, across all threads. */
+export function pendingDeliveries(conversations) {
+  const open = []
+  for (const conversation of Object.values(conversations)) {
+    for (const delivery of conversation.deliveries ?? []) {
+      if (delivery.state === 'pending') open.push({ conversation, delivery })
+    }
+  }
+  return open.sort((a, b) => String(b.delivery.receivedAt).localeCompare(String(a.delivery.receivedAt)))
 }
 
 export function decideDraft(conversation, draftId, decision, now) {

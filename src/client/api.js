@@ -59,6 +59,14 @@ export const api = {
   rejectConversation: (conversationId, reason) =>
     call('/iflow/panel/conversations/reject', { method: 'POST', body: { conversationId, reason } }),
 
+  // Ruling on work a remote Agent handed back. Not the same act as accepting
+  // the conversation: agreeing to talk is not agreeing the work is done.
+  decideDelivery: (conversationId, deliveryId, decision, reason) =>
+    call('/iflow/panel/deliveries/decide', {
+      method: 'POST',
+      body: { conversationId, deliveryId, decision, reason },
+    }),
+
   network: () => call('/iflow/panel/network'),
   probePeers: () => call('/iflow/panel/peers/probe', { method: 'POST' }),
 }

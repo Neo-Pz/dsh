@@ -20,7 +20,10 @@ const {
   findActiveConversation,
   loadConversations,
   loadTrust,
+  decideDelivery,
   findConversationWithPeer,
+  pendingDeliveries,
+  recordDelivery,
   markOutbound,
   markSeen,
   messageDigest,
@@ -386,5 +389,86 @@ describe('continuing a thread with the same peer', () => {
 
   it('answers nothing when asked about no peer at all', () => {
     assert.equal(findConversationWithPeer(store(withPeer('conv-1')), null, undefined), undefined)
+  })
+})
+
+describe('ruling on work handed back', () => {
+  const withDelivery = () => {
+    const conversation = newConversation('conv-1', { peer: 'if-lt-b', state: 'accepted' })
+    recordDelivery(conversation, { deliveryId: 'del-1', taskId: 'task-1', digest: 'sha256:abc' })
+    return conversation
+  }
+
+  it('starts owing a decision', () => {
+    assert.equal(withDelivery().deliveries[0].state, 'pending')
+  })
+
+  it('keeps the digest and not the answer', () => {
+    // The answer lives in the bound DSH session, which is where a person reads
+    // it. Copying it here would put the counterparty's text in a second place
+    // with different rules.
+    const delivery = withDelivery().deliveries[0]
+    assert.equal(delivery.digest, 'sha256:abc')
+    assert.equal('text' in delivery, false)
+  })
+
+  it('accepts once and then stays accepted', () => {
+    const c = withDelivery()
+    assert.equal(decideDelivery(c, 'del-1', 'accept')?.state, 'accepted')
+    // A later poll, or a second click, must not overturn something the far side
+    // has already been told.
+    assert.equal(decideDelivery(c, 'del-1', 'reject'), null)
+    assert.equal(c.deliveries[0].state, 'accepted')
+  })
+
+  it('sends back the same way', () => {
+    const c = withDelivery()
+    assert.equal(decideDelivery(c, 'del-1', 'reject')?.state, 'rejected')
+    assert.equal(decideDelivery(c, 'del-1', 'accept'), null)
+  })
+
+  it('refuses a decision that is neither', () => {
+    const c = withDelivery()
+    assert.equal(decideDelivery(c, 'del-1', 'maybe'), null)
+    assert.equal(c.deliveries[0].state, 'pending')
+  })
+
+  it('ignores a delivery it never received', () => {
+    assert.equal(decideDelivery(withDelivery(), 'del-other', 'accept'), null)
+  })
+
+  it('re-recording the same id replaces rather than duplicates', () => {
+    const c = withDelivery()
+    recordDelivery(c, { deliveryId: 'del-1', taskId: 'task-1', digest: 'sha256:def' })
+    assert.equal(c.deliveries.length, 1)
+    assert.equal(c.deliveries[0].digest, 'sha256:def')
+  })
+
+  it('lists only what is still owed, across threads, newest first', () => {
+    const a = newConversation('conv-a', { peer: 'p1' })
+    const b = newConversation('conv-b', { peer: 'p2' })
+    recordDelivery(a, { deliveryId: 'd-old', taskId: 't1', now: '2026-01-01T00:00:00.000Z' })
+    recordDelivery(b, { deliveryId: 'd-new', taskId: 't2', now: '2026-02-01T00:00:00.000Z' })
+    recordDelivery(a, { deliveryId: 'd-done', taskId: 't3', now: '2026-03-01T00:00:00.000Z' })
+    decideDelivery(a, 'd-done', 'accept')
+
+    const open = pendingDeliveries({ 'conv-a': a, 'conv-b': b })
+    assert.deepEqual(open.map((entry) => entry.delivery.deliveryId), ['d-new', 'd-old'])
+  })
+
+  it('does not grow without bound', () => {
+    const c = newConversation('conv-1', { peer: 'p' })
+    for (let i = 0; i < 200; i++) recordDelivery(c, { deliveryId: `d-${i}`, taskId: `t-${i}` })
+    assert.ok(c.deliveries.length <= 50)
+  })
+
+  it('survives a reload', async () => {
+    const c = withDelivery()
+    decideDelivery(c, 'del-1', 'accept')
+    const ctx = fakeFs({
+      [conversationsPath(join, WORKSPACE)]: JSON.stringify({ conversations: { 'conv-1': c } }),
+    })
+    const loaded = await loadConversations(ctx, join, WORKSPACE)
+    assert.equal(loaded.conversations['conv-1'].deliveries[0].state, 'accepted')
   })
 })
