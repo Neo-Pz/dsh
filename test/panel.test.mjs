@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -365,5 +365,47 @@ describe('stopping', () => {
     assert.ok(stored, 'the decision must be persisted')
     assert.ok(JSON.parse(stored).stoppedAt)
     assert.ok(!JSON.parse(stored).token, 'the credential must not be left on disk after going offline')
+  })
+})
+
+describe('where conversations are filed, versus where you are looking', () => {
+  let workspace
+  let host
+
+  before(async () => {
+    workspace = mkdtempSync(join(tmpdir(), 'iflow-ws-'))
+    host = createStubContext(workspace)
+    const plugin = (await import(pathToFileURL(BUNDLE).href)).default
+    plugin.apply(host.ctx, {})
+    await waitFor(() => host.routes.has('/iflow/panel/state'), 'the panel routes to mount')
+  })
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true })
+  })
+
+  const stateNow = async () => (await host.call('/iflow/panel/state', { method: 'GET' })).json
+
+  it('reports no mismatch when conversations go to the workspace you are in', async () => {
+    await host.call('/iflow/panel/conversation-workspace', { method: 'POST', body: { path: workspace } })
+    const state = await stateNow()
+    assert.equal(state.conversationWorkspace.path, workspace)
+    assert.equal(state.conversationWorkspace.elsewhere, false)
+  })
+
+  it('reports the two folders differing, because that is when sessions look lost', async () => {
+    // The render test feeds `elsewhere` in directly, so it says nothing about
+    // whether anything computes it. This covers the computation: without it the
+    // panel stays silent exactly when a person is staring at 未分组 wondering
+    // what broke.
+    const elsewhere = join(workspace, 'dsh-wechat')
+    mkdirSync(elsewhere, { recursive: true })
+    await host.call('/iflow/panel/conversation-workspace', { method: 'POST', body: { path: elsewhere } })
+
+    const state = await stateNow()
+    assert.equal(state.conversationWorkspace.path, elsewhere)
+    assert.equal(state.conversationWorkspace.elsewhere, true, 'the mismatch is not reported')
+    // The DSH workspace is still named, so the panel can say which one it means.
+    assert.equal(state.conversationWorkspace.defaultPath, workspace)
   })
 })

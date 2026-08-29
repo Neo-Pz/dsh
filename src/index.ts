@@ -4841,6 +4841,22 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
             path: conversationWorkspace.path,
             confirmed: conversationWorkspace.confirmed,
             defaultPath: workspace,
+            /**
+             * Whether conversations are being filed somewhere other than the
+             * DSH workspace this panel is open in.
+             *
+             * Not an error — filing them where they were asked to go is the
+             * correct behaviour. But DSH groups its session list by folder, so
+             * a conversation belonging to a different one appears under
+             * 未分组, and the only reading available to a person looking at it
+             * is that something went wrong. Saying it here is the difference
+             * between a setting and a mystery.
+             */
+            elsewhere: Boolean(
+              conversationWorkspace.confirmed &&
+                conversationWorkspace.path &&
+                conversationWorkspace.path !== workspace,
+            ),
           },
           // Cached reachability, deliberately NOT probed here. The Launcher
           // polls this route every 15 seconds; probing on that path would turn

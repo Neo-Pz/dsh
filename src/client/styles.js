@@ -92,6 +92,8 @@ export const STYLES = `
 }
 .ifp-muted { font-size: 12px; color: var(--dsw-alias-label-tertiary, #9aa3ad); }
 .ifp-error { font-size: 13px; color: #b3261e; margin-top: 10px; }
+/* A caveat, not a failure: what it describes is working as configured. */
+.ifp-warn { font-size: 12px; line-height: 1.6; color: #8a5a00; margin-top: 8px; }
 .ifp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 
 .ifp-posture { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }

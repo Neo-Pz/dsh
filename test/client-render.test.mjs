@@ -378,6 +378,42 @@ describe('the Hub', () => {
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })
 
+  it('says when conversations are being filed outside the workspace you are looking at', async () => {
+    // Filing them where they were asked to go is correct. But DSH groups its
+    // session list by folder, so they show up under 未分组 from here, and the
+    // only reading available to someone looking at that is that something broke.
+    responses['/iflow/panel/state'] = baseState({
+      conversationWorkspace: {
+        path: 'F:/work/dsh-wechat',
+        defaultPath: 'F:/work',
+        confirmed: true,
+        elsewhere: true,
+      },
+    })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.match(container.textContent, /不是你当前打开的 DSH 工作区/)
+    assert.match(container.textContent, /未分组/)
+    // And it says what to do about it, including that nothing gets moved.
+    assert.match(container.textContent, /已有对话不会被移动/)
+
+    responses['/iflow/panel/state'] = baseState()
+  })
+
+  it('says nothing when the two are the same folder', async () => {
+    // A warning that is always on is furniture.
+    responses['/iflow/panel/state'] = baseState({
+      conversationWorkspace: { path: 'F:/work', defaultPath: 'F:/work', confirmed: true, elsewhere: false },
+    })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.equal(container.textContent.includes('不是你当前打开的 DSH 工作区'), false)
+
+    responses['/iflow/panel/state'] = baseState()
+  })
+
   it('lists Agents allowed to keep messaging, and offers to take it back', async () => {
     // Something granted by a click has to be findable and withdrawable by one,
     // or it is not really a decision — it is a consequence.
