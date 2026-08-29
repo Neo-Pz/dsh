@@ -54,6 +54,8 @@ export const api = {
 
   // Conversations: the inbox, and the two answers a person can give it.
   conversations: () => call('/iflow/panel/conversations'),
+  conversationMessages: (conversationId, cursor, limit) =>
+    call('/iflow/panel/conversations/messages', { method: 'POST', body: { conversationId, cursor, limit } }),
   acceptConversation: (conversationId) =>
     call('/iflow/panel/conversations/accept', { method: 'POST', body: { conversationId } }),
   rejectConversation: (conversationId, reason) =>

@@ -171,6 +171,14 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.listConversations())
     }, { write: true })],
 
+    // Reading a thread is not changing anything, so it is a read route — and
+    // like every read here it still answers this machine only unless a token
+    // says otherwise.
+    ['/iflow/panel/conversations/messages', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.conversationMessages(body.conversationId, body.cursor, body.limit))
+    }, { write: false })],
+
     ['/iflow/panel/conversations/accept', 'POST', guard(async (request, response) => {
       const body = await readJson(request)
       send(response, 200, await deps.acceptConversation(body.conversationId))

@@ -253,9 +253,13 @@ describe('the Hub', () => {
     responses['/iflow/panel/network'] = GRAPH
   })
 
-  it('renders all five tabs', async () => {
+  it('renders every tab, by name', async () => {
+    // Counting them said "five" and nothing about which five, so adding one
+    // failed with a number instead of a name. The labels are what a person
+    // navigates by.
     await mount(slots.get('settings.section'))
-    assert.equal(tabs().length, 5, tabs().map((t) => t.textContent).join(' | '))
+    const labels = tabs().map((tab) => tab.textContent.replace(/\d+$/, ''))
+    assert.deepEqual(labels, ['待处理', '对话', 'Agents', '网络', '交易', '我'])
   })
 
   it('lands on Requests when something is waiting, and badges the count', async () => {
@@ -452,6 +456,63 @@ describe('the Hub', () => {
     assert.match(container.textContent, /不再每次来问你/)
 
     responses['/iflow/panel/state'] = baseState()
+  })
+
+  it('draws a conversation with the other party on the left, whoever wrote it', async () => {
+    // DSH's own session view cannot do this and should not be blamed for it: a
+    // peer's message has to arrive as a user turn to prompt the local Agent,
+    // and DSH puts user turns on the right. This view reads the authorship the
+    // plugin records instead.
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [{ ...PENDING_CONVERSATION, conversationId: 'conv-x', state: 'accepted', peer: 'if-lt-b' }],
+    }
+    responses['/iflow/panel/conversations/messages'] = {
+      ok: true,
+      conversationId: 'conv-x',
+      messages: [
+        {
+          messageId: 'm1', side: 'peer', role: 'human', authorLabel: 'if-lt-b',
+          text: '他们那边有人打的字', createdAt: '2026-08-24T10:00:00.000Z',
+        },
+        {
+          messageId: 'm2', side: 'self', role: 'human', authorLabel: 'GenOnA',
+          text: '我打的字', createdAt: '2026-08-24T10:01:00.000Z',
+        },
+        {
+          messageId: 'm3', side: 'self', role: 'agent', authorLabel: 'GenOnA',
+          text: '我的 Agent 自己说的', createdAt: '2026-08-24T10:02:00.000Z',
+        },
+      ],
+      nextCursor: '3',
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('对话')
+    const row = [...container.querySelectorAll('button')].find((b) => b.textContent.includes('if-lt-b'))
+    assert.ok(row, 'the counterparty is not listed')
+    await React.act(async () => {
+      row.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+    await settle()
+
+    const lines = [...container.querySelectorAll('.ifp-msg')]
+    assert.equal(lines.length, 3)
+
+    // A person on the far side: human badge, and still on the left.
+    assert.ok(lines[0].classList.contains('theirs'), 'the other party is not on the left')
+    assert.match(lines[0].textContent, /👤/)
+    assert.match(lines[0].textContent, /对方 · 经由 if-lt-b/)
+
+    // My own typing: same badge, other side, and both names on it.
+    assert.ok(lines[1].classList.contains('mine'))
+    assert.match(lines[1].textContent, /你 · 经由 GenOnA/)
+
+    // My Agent speaking for itself: no person, just the Agent.
+    assert.ok(lines[2].classList.contains('mine'))
+    assert.match(lines[2].textContent, /🤖/)
+    assert.equal(lines[2].textContent.includes('经由'), false, 'an Agent’s own words were attributed to a person')
+
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })
 
   it('shows peers and declared Agents', async () => {

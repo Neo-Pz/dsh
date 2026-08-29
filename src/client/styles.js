@@ -194,6 +194,25 @@ export const STYLES = `
 .ifp-delivery p { margin: 6px 0 8px; font-size: 12px; line-height: 1.55; }
 .ifp-delivery .ifp-req-actions { margin-top: 8px; }
 
+/* A conversation, as both ends would recognise it.
+   Left and right come from which side of the thread a message came from, never
+   from who wrote it: a person on the far side belongs on the left. */
+.ifp-thread { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ifp-msg { max-width: 82%; border-radius: 10px; padding: 8px 11px; }
+.ifp-msg.theirs { align-self: flex-start; background: rgba(0,0,0,.035); }
+.ifp-msg.mine { align-self: flex-end; background: rgba(47,109,246,.09); }
+.ifp-msg-who { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 4px; }
+.ifp-msg-body { font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.ifp-msg-state { font-size: 11px; margin-top: 4px; }
+
+.ifp-chats li { padding: 0; }
+.ifp-chat-row {
+  display: grid; grid-template-columns: minmax(6rem, 12rem) 1fr auto; gap: 12px;
+  align-items: baseline; width: 100%; padding: 10px 4px; text-align: left;
+  background: none; border: none; color: inherit; font: inherit; cursor: pointer;
+}
+.ifp-chat-row:hover { background: rgba(0,0,0,.03); border-radius: 8px; }
+
 /* The relationship map. */
 .ifp-map { width: 100%; max-width: 340px; height: auto; display: block; margin: 4px auto 10px; }
 .ifp-map-label { font-size: 9px; fill: var(--dsw-alias-label-secondary, #6b7280); font-family: inherit; }
