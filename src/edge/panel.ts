@@ -181,6 +181,13 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.rejectConversation(body.conversationId, body.reason))
     }, { write: true })],
 
+    // Ruling on work a remote Agent handed back. A separate act from accepting
+    // the conversation: agreeing to talk is not agreeing the work is done.
+    ['/iflow/panel/deliveries/decide', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.decideDelivery(body.conversationId, body.deliveryId, body.decision, body.reason))
+    }, { write: true })],
+
     // The relationship graph the Hub's Network tab draws. Guarded like the rest
     // of the panel rather than served as a projection: who this machine has
     // talked to is not the same kind of fact as what it published, and the
