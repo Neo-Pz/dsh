@@ -736,7 +736,10 @@ export default {
             messageId,
             contentOrigin,
             originIntentId,
-            actorType: 'agent',
+            // Who produced the words, carried honestly rather than flattened to
+            // `agent`. The Agent is always the network actor; that is a
+            // different fact and it is `fromAgentId` above.
+            actorType: contentOrigin === 'human' ? 'human' : 'agent',
             origin: originIntentId ? 'web_intent' : 'agent',
             principalId: state.principalId ?? undefined,
             // So the recipient can tell how this arrived. It changes nothing
@@ -1698,9 +1701,28 @@ ${text}`)
       let outputBlocks = []
       try {
         child.followup({
-          id: `iflow-${uid('msg')}`,
+          // The id the SENDER minted, not a fresh one.
+          //
+          // One network message, one id, on both machines. Minting a second
+          // here made the two ends unable to recognise the same message: no
+          // cross-node deduplication, no way to pair a reply with what it
+          // answered, and no way for two sessions to be views of one thread.
+          //
+          // Falls back to a new id only for a peer that sent none, which is an
+          // old node rather than a hostile one.
+          id: thread.messageId || `iflow-${uid('msg')}`,
           role: 'user',
           content: [{ type: 'text', text }],
+          // The far side wrote this. `kind: 'user'` is what DSH needs to
+          // persist it; who it was is recorded beside it, because a peer's
+          // message landing as an ordinary local user turn is exactly backwards.
+          iflow: authorship({
+            author: thread.actorType === 'human' ? 'human' : 'agent',
+            authorAgentId: thread.peerAgentId ?? null,
+            authorLabel: from ?? thread.peerAgentId ?? null,
+            represents: thread.peerAgentId ?? null,
+            side: 'peer',
+          }),
           source: { kind: 'user' },
         })
         await child.whenIdle()
@@ -2015,6 +2037,8 @@ ${text}`)
         actorType,
         origin,
         localAgentLabel: toAgentId,
+        // Who is on the other end of this, for the authorship record.
+        peerAgentId: typeof metadata.fromAgentId === 'string' ? metadata.fromAgentId : from,
       })
       state.outgoing.get(taskId).done = done
       done.catch((err) => console.error(`iFlow task ${taskId} unhandled run error`, err))
@@ -3986,16 +4010,43 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       return { handle, controller }
     }
 
-    function appendWebHuman(session, text, messageId) {
+    function appendWebHuman(session, text, messageId, represents) {
       session.append('user/message', {
         id: messageId,
         role: 'user',
         content: [{ type: 'text', text }],
+        // A person wrote this and an Agent carries it. Both are true, and the
+        // architecture rests on not having to choose: a Human is not a network
+        // actor, it acts through the Agent that represents it.
+        iflow: authorship({ author: 'human', represents: represents ?? null, side: 'self' }),
         source: { kind: 'plugin', plugin: 'iflow' },
       }, { surfaceOp: 'append' })
     }
 
-    function appendRemoteAgent(session, text, messageId) {
+    /**
+     * Authorship, written down instead of guessed at later.
+     *
+     * DSH's event type says whether a message is a user turn or an assistant
+     * turn. It does not say WHOSE — and in a conversation with two Agents on
+     * two machines that is the only question worth asking. Reading `assistant`
+     * as "the peer" attributes this node's own Agent to the far side; reading
+     * `user` as "me" cannot see a person on the other end at all.
+     *
+     * So four separate things, none of them derivable from the other three:
+     *   author         who produced the words: a person, or an Agent
+     *   authorAgentId  which Agent, when an Agent produced them
+     *   represents     the Agent that carries them onto the network and signs
+     *   side           `self` or `peer`, relative to this node
+     *
+     * `side` is stored rather than computed because this record belongs to one
+     * machine. The same signed message is `self` here and `peer` there, and
+     * each end writes its own session.
+     */
+    function authorship({ author, authorAgentId, authorLabel, represents, side }) {
+      return { v: 1, author, authorAgentId: authorAgentId ?? null, authorLabel: authorLabel ?? null, represents: represents ?? null, side }
+    }
+
+    function appendRemoteAgent(session, text, messageId, peer = {}) {
       session.append('assistant/message', {
         turn: 0,
         step: 0,
@@ -4003,13 +4054,26 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           id: messageId,
           role: 'assistant',
           content: [{ type: 'text', text }],
+          // Extra keys survive persistence and DSH ignores them, so this is
+          // where the truth lives for anything of ours that reads the session
+          // back — the web Chat view, and any projection after it.
+          iflow: authorship({
+            author: peer.author === 'human' ? 'human' : 'agent',
+            authorAgentId: peer.agentId ?? null,
+            authorLabel: peer.label ?? peer.agentId ?? null,
+            represents: peer.agentId ?? null,
+            side: 'peer',
+          }),
           // `kind: 'model'` is not decoration. DSH validates every persisted
           // assistant message and requires a non-empty `source.kind`, then
           // requires it to be exactly `model` with a provider and a model.
           // Without it the append succeeds and the SESSION becomes unloadable
           // — `SessionPersistenceCorruptionError: message has invalid source`
           // — so the damage shows up later, on a session nobody was editing.
-          source: { kind: 'model', provider: 'iflow', model: 'remote-agent' },
+          // `model` is the field DSH shows for who produced the text, and from
+          // this session's point of view that is the remote Agent. Naming it
+          // here is what stops the peer's words reading as this node's own.
+          source: { kind: 'model', provider: 'iflow', model: peer.label || peer.agentId || 'remote-agent' },
         },
       }, { surfaceOp: 'append' })
     }
@@ -4026,17 +4090,34 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         if (event?.type !== 'user/message' && event?.type !== 'assistant/message') return []
         const text = eventText(event)
         if (!text) return []
+        // Written authorship first. The event type says user turn or assistant
+        // turn; it does not say whose, and inferring "assistant means the peer"
+        // hands this node's own Agent to the far side every time it speaks.
+        const marked = event.data?.iflow ?? event.data?.message?.iflow
         const human = event.type === 'user/message'
+        // Sessions written before authorship was recorded fall back to the old
+        // inference. It is wrong for a local Agent's own replies and right for
+        // everything else, which is exactly why it could not stay.
+        const side = marked?.side ?? (human ? 'self' : 'peer')
+        const author = marked?.author ?? (human ? 'human' : 'agent')
+        const selfLabel = conversation.localAgentId || 'You'
+        const peerLabel = conversation.peer || conversation.peerAgentId || 'Agent'
         return [{
           index,
           messageId: event.data?.id ?? event.data?.message?.id ?? `session-${index}`,
           conversationId: conversation.conversationId,
-          authorAgentId: human ? conversation.localAgentId : conversation.peerAgentId,
-          authorLabel: human
-            ? (conversation.localAgentId || 'You')
-            : (conversation.peer || conversation.peerAgentId || 'Agent'),
-          contentOrigin: human ? 'human' : 'agent',
-          role: human ? 'human' : 'agent',
+          // Which side of the conversation, and who wrote it, are two answers.
+          // A person on the far side is still on the far side.
+          side,
+          authorAgentId: marked?.authorAgentId
+            ?? (side === 'self' ? conversation.localAgentId : conversation.peerAgentId),
+          authorLabel: marked?.authorLabel ?? (side === 'self' ? selfLabel : peerLabel),
+          // The Agent that carries it onto the network and signs for it, which
+          // is never the person even when the person wrote the words.
+          representedBy: marked?.represents
+            ?? (side === 'self' ? conversation.localAgentId : conversation.peerAgentId),
+          contentOrigin: author,
+          role: author,
           text,
           createdAt: event.at ?? conversation.updatedAt,
         }]
@@ -4062,7 +4143,12 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       const conversation = state.conversations[conversationId]
       if (!conversation || !markSeen(conversation, `reply:${messageId}`)) return false
       const opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
-      try { appendRemoteAgent(opened.handle.agent.session, text, messageId) }
+      try {
+        appendRemoteAgent(opened.handle.agent.session, text, messageId, {
+          agentId: conversation.peerAgentId,
+          label: conversation.peer || conversation.peerAgentId,
+        })
+      }
       finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
       conversation.updatedAt = iso()
       await persistConversations()
@@ -4203,7 +4289,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           }
         }
 
-        if (isNewIntent) appendWebHuman(opened.handle.agent.session, intent.text, intentId)
+        if (isNewIntent) appendWebHuman(opened.handle.agent.session, intent.text, intentId, ownAgentId)
       } finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
 
       const outcome = await sendViaRelay({
