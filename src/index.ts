@@ -4313,6 +4313,12 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
               state: c.state,
               preview: c.preview,
               boundSession: c.binding ? c.binding.localSessionId : null,
+              // Deliveries still owed a ruling, so the panel can offer the
+              // decision on the thread it belongs to. Digest and timing only:
+              // the answer is read in the bound session, not here.
+              deliveries: (c.deliveries ?? [])
+                .filter((d) => d.state === 'pending')
+                .map((d) => ({ deliveryId: d.deliveryId, taskId: d.taskId, receivedAt: d.receivedAt })),
               createdAt: c.createdAt,
               updatedAt: c.updatedAt,
             })),

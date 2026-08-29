@@ -179,6 +179,19 @@ export const STYLES = `
 .ifp-req-actions .ifp-btn { padding: 6px 12px; }
 .ifp-req.waiting { background: rgba(47,109,246,.04); border-radius: 8px; padding-left: 10px; padding-right: 10px; }
 
+/* Work handed back, waiting on a ruling. Set apart from the row rather than
+   sitting in it: deciding a conversation and deciding the work are different
+   agreements, and putting them side by side invites confusing the two. */
+.ifp-delivery {
+  flex-basis: 100%;
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px solid rgba(214,158,46,.35); border-radius: 8px;
+  background: rgba(214,158,46,.05);
+}
+.ifp-delivery-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.ifp-delivery p { margin: 6px 0 8px; font-size: 12px; line-height: 1.55; }
+.ifp-delivery .ifp-req-actions { margin-top: 8px; }
+
 /* The relationship map. */
 .ifp-map { width: 100%; max-width: 340px; height: auto; display: block; margin: 4px auto 10px; }
 .ifp-map-label { font-size: 9px; fill: var(--dsw-alias-label-secondary, #6b7280); font-family: inherit; }

@@ -322,6 +322,69 @@ describe('the Hub', () => {
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })
 
+  it('offers a ruling on work handed back, separately from accepting the thread', async () => {
+    // Accepting a conversation and accepting the work are different agreements
+    // made at different times. If they ever share a control, someone rules on
+    // work by clicking the thing that means "yes, we can talk".
+    responses['/iflow/panel/state'] = baseState({ conversationsPending: 0 })
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [
+        {
+          ...PENDING_CONVERSATION,
+          conversationId: 'conv-d',
+          state: 'accepted',
+          peer: 'if-lt-b',
+          deliveries: [{ deliveryId: 'del-1', taskId: 'task-1', receivedAt: '2026-08-24T10:00:00.000Z' }],
+        },
+      ],
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('待处理')
+
+    assert.match(container.textContent, /等你验收/)
+    assert.match(container.textContent, /验收/)
+    assert.match(container.textContent, /退回/)
+    // The thread is already accepted, so the conversation's own answers are gone
+    // and only the ruling is on offer.
+    assert.equal(container.querySelector('.ifp-req.waiting'), null)
+
+    responses['/iflow/panel/state'] = baseState()
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
+  it('will not send work back without a reason', async () => {
+    // The far side has nothing to act on without one, and the domain requires
+    // it. Enforced in the UI too, so the refusal is not a round trip.
+    responses['/iflow/panel/state'] = baseState({ conversationsPending: 0 })
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [
+        {
+          ...PENDING_CONVERSATION,
+          conversationId: 'conv-d',
+          state: 'accepted',
+          deliveries: [{ deliveryId: 'del-1', taskId: 'task-1', receivedAt: '2026-08-24T10:00:00.000Z' }],
+        },
+      ],
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('待处理')
+
+    const openSendBack = [...container.querySelectorAll('button')].find((b) => b.textContent.startsWith('退回'))
+    assert.ok(openSendBack, 'no way to send work back')
+    await React.act(async () => {
+      openSendBack.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+
+    const confirm = [...container.querySelectorAll('button')].find((b) => b.textContent === '确认退回')
+    assert.ok(confirm, 'the reason step did not open')
+    assert.equal(confirm.disabled, true, 'work could be sent back with no reason given')
+
+    responses['/iflow/panel/state'] = baseState()
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
   it('shows peers and declared Agents', async () => {
     await mount(slots.get('settings.section'))
     await clickTab('Agents')

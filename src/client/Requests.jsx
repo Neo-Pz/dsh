@@ -35,8 +35,78 @@ const STATE_TONE = {
   closed: 'hidden',
 }
 
-function Row({ conversation, busy, onAccept, onReject }) {
+/**
+ * Work a remote Agent handed back, waiting on a decision here.
+ *
+ * Deliberately its own block rather than another pair of buttons on the row.
+ * Accepting a conversation and accepting the work are different agreements
+ * made at different moments, and a row that offered both would invite ruling on
+ * work by clicking the thing that means "yes, we can talk".
+ */
+function DeliveryRuling({ conversationId, delivery, busy, onDecide }) {
+  const [reason, setReason] = React.useState('')
+  const [sendingBack, setSendingBack] = React.useState(false)
+
+  return (
+    <div className="ifp-delivery">
+      <div className="ifp-delivery-head">
+        <span className="ifp-tag up">等你验收</span>
+        <span className="ifp-muted">
+          对方交回了结果 · <Ago at={delivery.receivedAt} />
+        </span>
+      </div>
+      <p className="ifp-muted">
+        答复在这条对话的本地 Session 里，读完再决定。在你决定之前，这件事对双方都还没有结束。
+      </p>
+      {sendingBack ? (
+        <div className="ifp-field">
+          <span>退回的理由（对方会看到）</span>
+          <input
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="哪里不对，或还缺什么"
+            maxLength={200}
+          />
+        </div>
+      ) : null}
+      <div className="ifp-req-actions">
+        {sendingBack ? (
+          <>
+            <button
+              className="ifp-btn danger"
+              disabled={busy || reason.trim().length === 0}
+              onClick={() => onDecide(conversationId, delivery.deliveryId, 'reject', reason.trim())}
+            >
+              确认退回
+            </button>
+            <button className="ifp-btn" disabled={busy} onClick={() => setSendingBack(false)}>
+              取消
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              className="ifp-btn primary"
+              disabled={busy}
+              onClick={() => onDecide(conversationId, delivery.deliveryId, 'accept')}
+            >
+              验收
+            </button>
+            {/* Sending back needs a reason, so it opens a field rather than
+                firing — the far side has nothing to act on without one. */}
+            <button className="ifp-btn" disabled={busy} onClick={() => setSendingBack(true)}>
+              退回…
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Row({ conversation, busy, onAccept, onReject, onDecideDelivery }) {
   const waiting = conversation.state === 'pending'
+  const deliveries = conversation.deliveries ?? []
   return (
     <li className={`ifp-req${waiting ? ' waiting' : ''}`}>
       <div className="ifp-req-main">
@@ -65,6 +135,15 @@ function Row({ conversation, busy, onAccept, onReject }) {
           </button>
         </div>
       ) : null}
+      {deliveries.map((delivery) => (
+        <DeliveryRuling
+          key={delivery.deliveryId}
+          conversationId={conversation.conversationId}
+          delivery={delivery}
+          busy={busy}
+          onDecide={onDecideDelivery}
+        />
+      ))}
     </li>
   )
 }
@@ -170,6 +249,9 @@ export function RequestsTab({ onChanged }) {
               busy={busy}
               onAccept={(id) => answer(() => api.acceptConversation(id))}
               onReject={(id) => answer(() => api.rejectConversation(id))}
+              onDecideDelivery={(conversationId, deliveryId, decision, reason) =>
+                answer(() => api.decideDelivery(conversationId, deliveryId, decision, reason))
+              }
             />
           ))}
         </ul>
