@@ -141,10 +141,26 @@ export function RequestsTab({ onChanged }) {
         title={pending.length > 0 ? `${pending.length} 条等你答复` : '没有待处理的事'}
         tone={pending.length > 0 ? 'warn' : 'on'}
       >
+        {/*
+          The title answers "is anything waiting on me", the list below shows
+          every conversation. Saying only "都已经答复过了" above a list of items
+          read as a contradiction — nothing to do, followed by things — so the
+          second sentence says what the list actually is.
+        */}
         <p>
           {pending.length > 0
             ? '接受之后才会创建本地 Session、才会有模型开始处理。在此之前对方的消息只是停在这里。'
             : '所有对话都已经答复过了。'}
+          {sorted.length > 0 ? (
+            <>
+              {' '}
+              <span className="ifp-muted">
+                {pending.length > 0
+                  ? `以下是全部 ${sorted.length} 条对话，待答复的排在前面。`
+                  : `以下是全部 ${sorted.length} 条对话，按最近有动静排序。`}
+              </span>
+            </>
+          ) : null}
         </p>
         <ul className="ifp-list ifp-reqs">
           {sorted.map((conversation) => (
