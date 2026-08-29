@@ -44,6 +44,7 @@ import {
   taskText,
 } from './a2a/protocol.js'
 import { signingDigest, simpleHash } from './util/hash.js'
+import { inspectEvents, repairEvents } from './repair/session-source.js'
 import {
   allowPair,
   allowedPairs,
@@ -3237,6 +3238,143 @@ ${text}`)
             state: stateName,
             text,
             ...(text.length === 0 ? { error: `task ended in ${stateName} with no output` } : {}),
+          }
+        },
+      }),
+
+      defineTool({
+        name: 'iflow_repair_sessions',
+        description:
+          'iFlow: find local DSH sessions this plugin made unloadable by writing an assistant message with no source.kind, and optionally repair them. ' +
+          'Reports only unless apply is true. Every repair writes a .backup beside the file first.',
+        parameters: {
+          apply: { type: 'boolean', description: 'Write the repairs. Default false — report only.' },
+          sessionId: { type: 'string', description: 'Limit to one session id. Omit to scan every session store.' },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              applied: { type: 'boolean' },
+              summary: { type: 'string' },
+              error: { type: 'string' },
+              sessions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    sessionId: { type: 'string' },
+                    workspace: { type: 'string' },
+                    findings: { type: 'array', items: { type: 'string' } },
+                    repairable: { type: 'integer' },
+                    repaired: { type: 'array', items: { type: 'integer' } },
+                    error: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          render: (_args, value) => [
+            {
+              type: 'text',
+              text: value.ok
+                ? `${value.summary}${value.applied ? '' : ' (report only; pass apply: true to fix, a .backup is written first)'}` +
+                  (value.sessions ?? [])
+                    .map((entry) => {
+                      const lines = (entry.findings ?? []).join('\n  ')
+                      return `\n\n${entry.sessionId} (${entry.workspace})\n  ${lines}`
+                    })
+                    .join('')
+                : `could not scan: ${value.error}`,
+            },
+          ],
+        },
+        async handler(args) {
+          const { readdirSync, existsSync, statSync, readFileSync, writeFileSync, copyFileSync } = await import('node:fs')
+          const { join: joinPath } = await import('node:path')
+          const { zstdDecompressSync, zstdCompressSync } = await import('node:zlib')
+
+          const root = joinPath(process.env.USERPROFILE || process.env.HOME || '', '.dsh', 'sessions')
+          if (!existsSync(root)) return { ok: false, error: `no session store at ${root}` }
+
+          /**
+           * Sessions are appended as CONCATENATED zstd frames. Decoding only the
+           * first one returns the header and nothing else — which reads as a
+           * healthy session with no messages in it, for every session there is.
+           */
+          const decodeAll = (bytes) => {
+            const parts = []
+            let rest = bytes
+            while (rest.length > 0) {
+              let decoded
+              try { decoded = zstdDecompressSync(rest) } catch { break }
+              parts.push(decoded.toString('utf8'))
+              // `zstdDecompressSync` consumes one frame; find where it ended by
+              // re-compressing is not reliable, so walk frames by magic number.
+              const next = findNextFrame(rest, 1)
+              if (next < 0) break
+              rest = rest.subarray(next)
+            }
+            return parts.join('')
+          }
+
+          const findNextFrame = (bytes, from) => {
+            for (let i = from; i + 4 <= bytes.length; i++) {
+              if (bytes[i] === 0x28 && bytes[i + 1] === 0xb5 && bytes[i + 2] === 0x2f && bytes[i + 3] === 0xfd) return i
+            }
+            return -1
+          }
+
+          const scanned = []
+          for (const ws of readdirSync(root)) {
+            const wsPath = joinPath(root, ws)
+            if (!statSync(wsPath).isDirectory()) continue
+            for (const id of readdirSync(wsPath)) {
+              if (args.sessionId && id !== args.sessionId) continue
+              const file = joinPath(wsPath, id, 'session.jsonl.zstd')
+              if (!existsSync(file)) continue
+              let events
+              try {
+                events = decodeAll(readFileSync(file))
+                  .split('\n')
+                  .filter((line) => line.trim())
+                  .map((line) => JSON.parse(line))
+              } catch (err) {
+                scanned.push({ sessionId: id, workspace: ws, error: String(err && err.message ? err.message : err) })
+                continue
+              }
+              const findings = inspectEvents(events)
+              if (findings.length === 0) continue
+              const entry = {
+                sessionId: id,
+                workspace: ws,
+                findings: findings.map((f) => `seq ${f.seq} ${f.type}: ${f.reason}`),
+                repairable: findings.filter((f) => f.repairable).length,
+                repaired: [],
+              }
+              if (args.apply === true && entry.repairable > 0) {
+                const { events: fixed, repaired } = repairEvents(events)
+                // A backup first, always. This is DSH's store and somebody's
+                // history; a repair that cannot be undone is not a repair.
+                copyFileSync(file, `${file}.backup`)
+                const rewritten = `${fixed.map((event) => JSON.stringify(event)).join('\n')}\n`
+                writeFileSync(file, zstdCompressSync(Buffer.from(rewritten, 'utf8')))
+                entry.repaired = repaired
+              }
+              scanned.push(entry)
+            }
+          }
+
+          return {
+            ok: true,
+            applied: args.apply === true,
+            sessions: scanned,
+            summary: scanned.length === 0
+              ? 'no session has an unreadable message source'
+              : `${scanned.length} session(s) affected; ${scanned.reduce((n, s) => n + (s.repaired?.length ?? 0), 0)} event(s) repaired`,
           }
         },
       }),
