@@ -45,6 +45,15 @@ import {
 } from './a2a/protocol.js'
 import { signingDigest, simpleHash } from './util/hash.js'
 import {
+  allowPair,
+  allowedPairs,
+  emptyPermissions,
+  loadPermissions,
+  messagingPermission,
+  revokePair,
+  savePermissions,
+} from './conversation/permissions.js'
+import {
   activateConversation,
   bindSession,
   decideDraft,
@@ -139,6 +148,7 @@ export default {
       // lives where it does.
       conversations: {},
       trust: { default: 'ask', peers: {}, blocked: [] },
+      permissions: emptyPermissions(),
       // This node's own did:key, cached when the edge comes up so a
       // conversation participant can carry it without an await.
       nodeDid: null,
@@ -347,7 +357,19 @@ export default {
     const conversationsReady = Promise.all([
       loadConversations(ctx, join, workspace).then((store) => { state.conversations = store.conversations }),
       loadTrust(ctx, join, workspace).then((trust) => { state.trust = trust }),
+      // Standing permissions granted by a person clicking accept. Loaded with
+      // the rest for the same reason: a restart must not turn an Agent someone
+      // already allowed back into a stranger.
+      loadPermissions(ctx, join, workspace).then((permissions) => { state.permissions = permissions }),
     ]).catch((err) => { console.error('iFlow: could not load conversation state', err) })
+
+    async function persistPermissions() {
+      try {
+        await savePermissions(ctx, join, workspace, state.permissions)
+      } catch (err) {
+        console.error('iFlow savePermissions failed', err)
+      }
+    }
 
     async function persistConversations() {
       try {
@@ -398,6 +420,18 @@ export default {
         now: iso(),
       })
       void persistConversations()
+    }
+
+    /**
+     * The DID this node answers as, for keying a pair permission.
+     *
+     * Reads the cache rather than awaiting, because the decision it feeds is on
+     * the inbound hot path and identity is resolved at startup. Null before
+     * then, which makes `messagingPermission` return null, which falls through
+     * to asking a person — the safe direction.
+     */
+    function selfAuthorityDid() {
+      return identityCache && identityCache.did ? identityCache.did : null
     }
 
     function selfAgentId() {
@@ -1809,7 +1843,22 @@ ${text}`)
       // are different questions and both have to be asked.
       //
       // Default is `ask`. See src/conversation/store.ts for the policy.
-      const decision = trustDecision(state.trust, { peerLabel: from, signerDid, conversation })
+      // The pair permission is keyed on what the far side PROVED, not on the
+      // label it sent: `signerDid` comes from a verified signature, and an
+      // unsigned peer has no durable identity to have been granted anything.
+      const decision = trustDecision(state.trust, {
+        peerLabel: from,
+        signerDid,
+        conversation,
+        pairMessaging: messagingPermission(
+          state.permissions,
+          // The declared Agent the sender addressed, when it named one;
+          // otherwise this node's own identity. Both are stable across
+          // restarts, which is what a standing permission needs.
+          toAgentAuthorityDid || selfAuthorityDid(),
+          signerDid,
+        ),
+      })
       const task = {
         id: taskId,
         contextId: conversationId,
@@ -1994,6 +2043,31 @@ ${text}`)
       conversation.pendingTask = null
       await persistConversations()
 
+      // Saying yes to a first contact says yes to the pair, not to one thread.
+      //
+      // The gate is there so a stranger cannot make this machine spend a model.
+      // Someone has now looked at this peer and allowed it; asking again every
+      // time they reconnect with a new contextId is not more safety, it is the
+      // same question asked until people stop reading it.
+      //
+      // Only when the peer PROVED who it is. An unsigned peer has no durable
+      // identity to grant anything to, so its thread is accepted and nothing
+      // more — inventing a key from the label it sent would hand the permission
+      // to whoever claims that label next.
+      const localDid = conversation.localAgentAuthorityDid || selfAuthorityDid()
+      const peerDid = conversation.peerAgentAuthorityDid || conversation.peerDid
+      let granted = null
+      if (decidedBy === 'human' && localDid && peerDid) {
+        granted = allowPair(state.permissions, {
+          localAgentDid: localDid,
+          peerAgentDid: peerDid,
+          localAgentId: conversation.localAgentId,
+          peerLabel: conversation.peer,
+          now: iso(),
+        })
+        await persistPermissions()
+      }
+
       observeEdge('conversation.accepted', (observer) =>
         observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy }),
       )
@@ -2005,7 +2079,7 @@ ${text}`)
         }),
       )
 
-      if (!parked) return { ok: true, conversationId, state: 'accepted', delivered: false }
+      if (!parked) return { ok: true, conversationId, state: 'accepted', delivered: false, granted: Boolean(granted) }
 
       // The sender may already have given up waiting; the task object may also
       // be gone after a restart. Either way the conversation is now accepted,
