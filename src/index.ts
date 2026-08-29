@@ -3208,6 +3208,11 @@ ${text}`)
             const text = taskText(task)
             if (text.length > 0) try { await recordExchange('remote', text, `[agent:${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
             noteDelivery(outbound, task, text)
+            // Both halves of the exchange, into the thread they belong to.
+            await mirrorExchange(outbound, [
+              { side: 'self', messageId, text: args.prompt },
+              { side: 'peer', messageId: `${messageId}:reply`, text, author: 'agent' },
+            ])
             return {
               ok: task.status.state === 'TASK_STATE_COMPLETED' && text.length > 0,
               peer: args.peer,
@@ -3254,6 +3259,10 @@ ${text}`)
           const text = taskText(finalTask)
           if (text.length > 0) try { await recordExchange('remote', text, `[${args.peer}]`, args.peer, inbound) } catch (e) { /* best-effort */ }
           noteDelivery(outbound, finalTask, text)
+          await mirrorExchange(outbound, [
+            { side: 'self', messageId, text: args.prompt },
+            { side: 'peer', messageId: `${messageId}:reply`, text, author: 'agent' },
+          ])
           return {
             ok: stateName === 'TASK_STATE_COMPLETED' && text.length > 0,
             peer: args.peer,
@@ -4136,6 +4145,54 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       const opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
       try { return privateMessages(conversation, opened.handle.agent.session.events ?? [], cursor, limit) }
       finally { try { await opened.handle.dispose() } catch { /* best effort */ } }
+    }
+
+    /**
+     * Put an exchange into the Conversation's own session, whichever path it
+     * took to get here.
+     *
+     * Before this, only two of the three paths wrote anything: the web Chat box
+     * and a reply arriving over the relay. A message sent with `iflow_send`
+     * appeared in the journal and nowhere a person looks, and so did the answer
+     * to it — which is why the local session and the web view showed different
+     * halves of the same conversation.
+     *
+     * The Conversation's session is its own thread, not whichever session
+     * happened to call the tool. That is the point of the binding: one thread
+     * per counterparty, continuing across every turn that touches it.
+     */
+    async function mirrorExchange(conversation, entries) {
+      if (!conversation || entries.length === 0) return
+      let opened
+      try {
+        opened = await openConversationSession(conversation, conversation.peer || conversation.peerAgentId)
+      } catch (err) {
+        // A node whose operator has not chosen a conversation folder yet. The
+        // exchange still happened and is still journalled; it simply has
+        // nowhere local to be shown, and saying so beats failing the send.
+        console.log(`iFlow: could not mirror into a session — ${err && err.message ? err.message : err}`)
+        return
+      }
+      try {
+        for (const entry of entries) {
+          if (!entry.text) continue
+          // `markSeen` is what makes this safe to call from a path that may run
+          // twice: one network message, one id, appended once.
+          if (!markSeen(conversation, `mirror:${entry.messageId}`)) continue
+          if (entry.side === 'self') {
+            appendWebHuman(opened.handle.agent.session, entry.text, entry.messageId, conversation.localAgentId)
+          } else {
+            appendRemoteAgent(opened.handle.agent.session, entry.text, entry.messageId, {
+              agentId: conversation.peerAgentId,
+              label: conversation.peer || conversation.peerAgentId,
+              author: entry.author,
+            })
+          }
+        }
+        await persistConversations()
+      } finally {
+        try { await opened.handle.dispose() } catch { /* best effort */ }
+      }
     }
 
     async function appendReplyToConversation(conversationId, text, messageId) {
