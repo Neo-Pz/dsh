@@ -49,6 +49,7 @@ import {
   bindSession,
   decideDraft,
   findActiveConversation,
+  findConversationWithPeer,
   loadConversations,
   markOutbound,
   pendingOutbound,
@@ -2789,7 +2790,8 @@ ${text}`)
           prompt: { type: 'string', required: true, description: 'The task description to send to the remote agent.' },
           waitForCompletion: { type: 'boolean', description: 'Wait for the remote task to finish and return its answer. Default true.' },
           maxWaitSeconds: { type: 'integer', description: 'Cap on how long to wait for completion. Default 600 (10 minutes), max 3600.' },
-          conversationId: { type: 'string', description: 'Continue an existing conversation with this peer. Omit to start a new one; use iflow_conversations to list them.' },
+          conversationId: { type: 'string', description: 'Continue this exact conversation. Omit to continue the open one with this peer; use iflow_conversations to list them.' },
+          newConversation: { type: 'boolean', description: 'Start a separate thread with this peer instead of continuing the open one. Default false.' },
           fromAgentId: { type: 'string', description: 'Declared Agent that signs and sends. Required when this Node has more than one Agent.' },
         },
         output: {
@@ -2834,13 +2836,24 @@ ${text}`)
           await conversationsReady
           // Continue a named thread, or start one. Either way the id travels as
           // the A2A `contextId`, which is where a peer already looks for it.
-          const conversationId =
-            typeof args.conversationId === 'string' && args.conversationId.length > 0
-              ? args.conversationId
-              : `conv-${uid('c')}`
+          // Continuing beats starting. A caller naming a thread gets that
+          // thread; otherwise the open one with this peer is reused, because a
+          // model calling this tool has no memory of yesterday's
+          // conversationId and would otherwise open a new thread on every
+          // message — twenty threads with one peer, none of them the history.
+          // Starting a fresh thread stays possible, but has to be asked for.
+          const explicitId =
+            typeof args.conversationId === 'string' && args.conversationId.length > 0 ? args.conversationId : null
+          const existing = explicitId || args.newConversation === true
+            ? undefined
+            : findConversationWithPeer(state.conversations, selfAgentId(), args.peer)
+          const conversationId = explicitId ?? existing?.conversationId ?? `conv-${uid('c')}`
           const startingIt = !state.conversations[conversationId]
           const outbound = resolveConversation(conversationId, {
             peer: args.peer,
+            // Recorded so the next send can scope the lookup to this Agent
+            // rather than matching any thread that happens to name the peer.
+            localAgentId: selfAgentId(),
             preview: args.prompt,
             // A thread this node opens is one it has agreed to by opening it.
             state: 'accepted',
@@ -3694,7 +3707,13 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           id: messageId,
           role: 'assistant',
           content: [{ type: 'text', text }],
-          source: { provider: 'iflow', model: 'remote-agent' },
+          // `kind: 'model'` is not decoration. DSH validates every persisted
+          // assistant message and requires a non-empty `source.kind`, then
+          // requires it to be exactly `model` with a provider and a model.
+          // Without it the append succeeds and the SESSION becomes unloadable
+          // — `SessionPersistenceCorruptionError: message has invalid source`
+          // — so the damage shows up later, on a session nobody was editing.
+          source: { kind: 'model', provider: 'iflow', model: 'remote-agent' },
         },
       }, { surfaceOp: 'append' })
     }

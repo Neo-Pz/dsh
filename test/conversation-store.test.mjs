@@ -20,6 +20,7 @@ const {
   findActiveConversation,
   loadConversations,
   loadTrust,
+  findConversationWithPeer,
   markOutbound,
   markSeen,
   messageDigest,
@@ -325,5 +326,65 @@ describe('what became of a message this node sent', () => {
     })
     const loaded = await loadConversations(ctx, join, WORKSPACE)
     assert.equal(loaded.conversations['conv-1'].outbound[0].state, 'delivered')
+  })
+})
+
+describe('continuing a thread with the same peer', () => {
+  const withPeer = (id, extra = {}) => {
+    const conversation = newConversation(id, { peer: 'if-lt-b', state: 'accepted', ...extra })
+    return conversation
+  }
+  const store = (...list) => Object.fromEntries(list.map((c) => [c.conversationId, c]))
+
+  it('finds the open thread by the name an outbound send uses', () => {
+    // `iflow_send` is handed a registered peer name or a URL. The peer's Agent
+    // id is not known until the far side answers, so matching only on that
+    // would never find an outbound thread — which is how one peer ended up
+    // with twenty of them.
+    const conversations = store(withPeer('conv-1'))
+    assert.equal(findConversationWithPeer(conversations, null, 'if-lt-b')?.conversationId, 'conv-1')
+  })
+
+  it('ignores a thread with somebody else', () => {
+    const conversations = store(withPeer('conv-1', { peer: 'someone-else' }))
+    assert.equal(findConversationWithPeer(conversations, null, 'if-lt-b'), undefined)
+  })
+
+  it('does not reopen a closed or rejected thread', () => {
+    for (const state of ['closed', 'rejected']) {
+      assert.equal(findConversationWithPeer(store(withPeer('c', { state })), null, 'if-lt-b'), undefined, state)
+    }
+  })
+
+  it('skips one that an explicit new thread superseded', () => {
+    // `activateConversation` leaves the old thread intact and only moves the
+    // pointer. Reusing a deactivated thread would undo that decision.
+    const old = withPeer('conv-old')
+    old.active = false
+    assert.equal(findConversationWithPeer(store(old), null, 'if-lt-b'), undefined)
+  })
+
+  it('keeps one Agent out of another Agent’s thread', () => {
+    const theirs = withPeer('conv-1', { localAgentId: 'agent-other' })
+    assert.equal(findConversationWithPeer(store(theirs), 'agent-mine', 'if-lt-b'), undefined)
+    assert.equal(findConversationWithPeer(store(theirs), 'agent-other', 'if-lt-b')?.conversationId, 'conv-1')
+  })
+
+  it('still reuses a thread opened before outbound sends recorded the Agent', () => {
+    // Every thread that already exists has a null localAgentId. Refusing those
+    // would leave exactly the pile of duplicates this is meant to end.
+    const legacy = withPeer('conv-legacy')
+    assert.equal(legacy.localAgentId, null)
+    assert.equal(findConversationWithPeer(store(legacy), 'agent-mine', 'if-lt-b')?.conversationId, 'conv-legacy')
+  })
+
+  it('matches when only the peer Agent id carries the name', () => {
+    const conversation = newConversation('conv-1', { peerAgentId: 'if-lt-b', state: 'accepted' })
+    assert.equal(conversation.peer, null)
+    assert.equal(findConversationWithPeer(store(conversation), null, 'if-lt-b')?.conversationId, 'conv-1')
+  })
+
+  it('answers nothing when asked about no peer at all', () => {
+    assert.equal(findConversationWithPeer(store(withPeer('conv-1')), null, undefined), undefined)
   })
 })
