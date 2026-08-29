@@ -59,6 +59,10 @@ export const api = {
   rejectConversation: (conversationId, reason) =>
     call('/iflow/panel/conversations/reject', { method: 'POST', body: { conversationId, reason } }),
 
+  // Standing permission for a pair of Agents, and taking it back.
+  revokePair: (localAgentDid, peerAgentDid) =>
+    call('/iflow/panel/permissions/revoke', { method: 'POST', body: { localAgentDid, peerAgentDid } }),
+
   // Ruling on work a remote Agent handed back. Not the same act as accepting
   // the conversation: agreeing to talk is not agreeing the work is done.
   decideDelivery: (conversationId, deliveryId, decision, reason) =>

@@ -4418,6 +4418,23 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
        * necessarily not the one that submitted — the fold refuses a
        * self-acceptance, and here the two are on different machines.
        */
+      /**
+       * Withdraw a pair's standing permission to message this node.
+       *
+       * Their next first contact stops at the gate again. Existing threads are
+       * left alone on purpose: revoking a permission is a decision about what
+       * happens next, and silently closing conversations would make it a
+       * decision about the past as well.
+       */
+      async revokePair(localAgentDid, peerAgentDid) {
+        await conversationsReady
+        if (!localAgentDid || !peerAgentDid) return { ok: false, error: 'both DIDs are required' }
+        const revoked = revokePair(state.permissions, localAgentDid, peerAgentDid, iso())
+        if (!revoked) return { ok: false, error: 'no standing permission for that pair' }
+        await persistPermissions()
+        return { ok: true, peerLabel: revoked.peerLabel }
+      },
+
       async decideDelivery(conversationId, deliveryId, decision, reason) {
         await conversationsReady
         if (!conversationId || !deliveryId) return { ok: false, error: 'conversationId and deliveryId are required' }
@@ -4559,6 +4576,15 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
           // The badge reads this. Because the Launcher already polls /state,
           // showing "someone is waiting" costs no additional request.
           conversationsPending: pendingConversationCount(),
+          // Pairs a person allowed to keep talking. Shown so the standing
+          // permission is visible and withdrawable, rather than being a
+          // consequence of a click nobody can find again.
+          allowedPairs: allowedPairs(state.permissions).map((pair) => ({
+            localAgentDid: pair.localAgentDid,
+            peerAgentDid: pair.peerAgentDid,
+            peerLabel: pair.peerLabel,
+            grantedAt: pair.grantedAt,
+          })),
           // Work handed back to this node and still owed a ruling. A separate
           // queue from pending conversations: agreeing to talk and agreeing the
           // work is done are different decisions, made at different times.

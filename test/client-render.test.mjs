@@ -378,6 +378,46 @@ describe('the Hub', () => {
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })
 
+  it('lists Agents allowed to keep messaging, and offers to take it back', async () => {
+    // Something granted by a click has to be findable and withdrawable by one,
+    // or it is not really a decision — it is a consequence.
+    responses['/iflow/panel/state'] = baseState({
+      allowedPairs: [
+        {
+          localAgentDid: 'did:key:zLocal',
+          peerAgentDid: 'did:key:zPeer',
+          peerLabel: 'wwee',
+          grantedAt: '2026-08-24T10:00:00.000Z',
+        },
+      ],
+    })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.match(container.textContent, /已授权的 Agent（1）/)
+    assert.match(container.textContent, /wwee/)
+    // States the boundary where someone reads it: allowing messages is not
+    // allowing anything else.
+    assert.match(container.textContent, /跑工具、花钱、验收任务都是分开的事/)
+    assert.ok(
+      [...container.querySelectorAll('button')].some((b) => b.textContent === '撤销'),
+      'no way to withdraw a standing permission',
+    )
+
+    responses['/iflow/panel/state'] = baseState()
+  })
+
+  it('says how permission gets granted when none has been', async () => {
+    responses['/iflow/panel/state'] = baseState({ allowedPairs: [] })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.match(container.textContent, /还没有/)
+    assert.match(container.textContent, /不再每次来问你/)
+
+    responses['/iflow/panel/state'] = baseState()
+  })
+
   it('shows peers and declared Agents', async () => {
     await mount(slots.get('settings.section'))
     await clickTab('Agents')
