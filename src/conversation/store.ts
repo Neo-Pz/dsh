@@ -276,6 +276,37 @@ export function findConversationWithPeer(conversations, localAgentId, peer) {
   )
 }
 
+/**
+ * One row per counterparty, for a list of who you talk to.
+ *
+ * Listing every thread showed the same Agent three times with nothing to tell
+ * the rows apart — a session manager wearing a chat app's clothes. The active
+ * thread is the one a message would continue, so it is the one that represents
+ * the pair; older threads keep their history and stop competing for the line.
+ *
+ * A thread with no counterparty recorded is skipped rather than grouped under
+ * a missing key, which would merge unrelated threads into one phantom row.
+ */
+export function collapseToCounterparties(conversations, localAgentId) {
+  const newest = new Map()
+  for (const candidate of Object.values(conversations)) {
+    if (candidate.localAgentId !== localAgentId) continue
+    const counterparty = candidate.peerAgentId || candidate.peer
+    if (!counterparty) continue
+    const held = newest.get(counterparty)
+    const liveNow = candidate.active !== false
+    const liveHeld = held ? held.active !== false : false
+    // Active wins outright; among equals, whichever spoke last.
+    const better = !held
+      || (liveNow && !liveHeld)
+      || (liveNow === liveHeld && String(candidate.updatedAt) > String(held.updatedAt))
+    if (better) newest.set(counterparty, candidate)
+  }
+  return [...newest.values()].sort((left, right) =>
+    String(right.updatedAt).localeCompare(String(left.updatedAt)),
+  )
+}
+
 export function activateConversation(conversations, conversation) {
   for (const candidate of Object.values(conversations)) {
     if (candidate.conversationId === conversation.conversationId) continue

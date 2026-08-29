@@ -56,6 +56,7 @@ import {
 } from './conversation/permissions.js'
 import {
   activateConversation,
+  collapseToCounterparties,
   bindSession,
   decideDraft,
   findActiveConversation,
@@ -4221,9 +4222,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       if (intent.kind === 'conversation.sync') {
         if (!intent.conversationId && !intent.peerAgentId) {
           const offset = Math.max(0, Number(intent.cursor) || 0)
-          const visible = Object.values(state.conversations)
-            .filter((candidate) => candidate.localAgentId === ownAgentId)
-            .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))
+          const visible = collapseToCounterparties(state.conversations, ownAgentId)
           const page = visible.slice(offset, offset + intent.limit)
           return {
             ok: true,
