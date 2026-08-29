@@ -461,3 +461,76 @@ describe('a redelivered message', () => {
     }
   })
 })
+
+describe('work done for another Principal', () => {
+  const readJournal = (workspace) =>
+    readFileSync(join(workspace, '.iflow', 'edge', 'origin.ndjson'), 'utf8')
+      .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+
+  it('is journaled as delegated across a boundary, and handed back rather than finished', async () => {
+    const { workspace, host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const task = await sendMessage(host, { text: 'please analyse this', from: 'peer-a' })
+      await waitFor(async () => (await getTask(host, task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+      await waitFor(
+        () => readJournal(workspace).some((e) => e.type === 'delivery.submitted'),
+        'the delivery to be journaled',
+      )
+      const journal = readJournal(workspace)
+      const of = (type) => journal.find((e) => e.type === type)
+
+      // The delegation states the crossing rather than leaving it to be
+      // inferred. Only this side knows: the request came from another node.
+      const delegated = of('task.delegated')
+      assert.ok(delegated, 'a remote request was not journaled as a delegation')
+      assert.equal(delegated.payload.crossesOwnershipBoundary, true)
+      assert.equal(delegated.payload.fromAgentId, 'peer-a')
+
+      // Handed back, not finished. `task.completed` here would let this node
+      // rule on work it did for somebody else.
+      assert.ok(of('delivery.submitted'), 'the answer was not journaled as a delivery')
+      assert.equal(of('task.completed'), undefined, 'the executor declared its own work accepted')
+      assert.equal(of('delivery.accepted'), undefined, 'nobody ruled, yet an acceptance exists')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('carries a digest of the answer as evidence, and not the answer', async () => {
+    const { workspace, host, cleanup } = await boot({ trust: { default: 'auto', peers: {}, blocked: [] } })
+    try {
+      const task = await sendMessage(host, { text: 'summarise the confidential file' })
+      await waitFor(async () => (await getTask(host, task.id)).status.state === 'TASK_STATE_COMPLETED', 'task')
+      await waitFor(
+        () => readJournal(workspace).some((e) => e.type === 'delivery.submitted'),
+        'the delivery to be journaled',
+      )
+      const delivery = readJournal(workspace).find((e) => e.type === 'delivery.submitted')
+
+      assert.equal(delivery.payload.evidence.length, 1)
+      assert.match(delivery.payload.evidence[0], /^sha256:[0-9a-f]{64}$/)
+      // The requester holds the text and can check it against this. Nobody else
+      // learns anything from a digest.
+      const answer = (await getTask(host, task.id)).artifacts?.[0]?.parts?.[0]?.text ?? ''
+      assert.ok(answer.length > 0, 'the run produced no answer to check against')
+      assert.equal(JSON.stringify(delivery).includes(answer), false, 'the answer itself was journaled')
+
+      // The request text has the same problem from the other side. `task.*` and
+      // `delivery.*` are publishable — unlike `conversation.*`, which the outbox
+      // filter blocks structurally — so an excerpt in a title reaches the
+      // Community just as surely as one in a summary.
+      const journal = readJournal(workspace)
+      for (const type of ['task.created', 'task.delegated', 'delivery.submitted']) {
+        const fact = journal.find((e) => e.type === type)
+        assert.ok(fact, `${type} was not journaled`)
+        assert.equal(
+          JSON.stringify(fact).includes('summarise the confidential file'),
+          false,
+          `${type} carries the request text`,
+        )
+      }
+    } finally {
+      await cleanup()
+    }
+  })
+})

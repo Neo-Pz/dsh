@@ -1674,7 +1674,25 @@ ${text}`)
             parts: [{ text: textOut, mediaType: 'text/plain' }],
           }]
         }
+        // A2A says completed and keeps saying it: that is what the sender's
+        // GetTask poll is waiting on, and changing it would hang every peer.
+        // What the journal records is narrower and truer — the work was handed
+        // back, and nobody has ruled on it.
         setStatus(taskId, 'TASK_STATE_COMPLETED', 'The task completed successfully.')
+        observeEdge('delivery.submitted', (observer) =>
+          observer.deliverySubmitted({
+            taskId,
+            deliveryId: `del-${taskId}`,
+            // The declared Agent that answered, which is the one that may not
+            // rule on this. `toAgentId` belongs to the request handler's scope,
+            // not this one.
+            byAgentId: conversation?.localAgentId ?? selfAgentId(),
+            outputs: [{ kind: 'artifact', id: task.artifacts[0].artifactId, summary: 'Final answer' }],
+            // A digest, never the answer. The requester holds the text and can
+            // check it against this; nobody else learns anything from it.
+            evidence: [messageDigest(textOut)],
+          }),
+        )
         // The reply is this Agent speaking, on the same thread the request
         // arrived on, addressed back to whoever asked.
         await recordExchange('self', textOut, `[agent:${thread.localAgentLabel || conversation?.localAgentId || 'Agent'}]`, from, {
@@ -1809,6 +1827,45 @@ ${text}`)
           grantRef: grant ? grant.grantId : undefined,
         }),
       )
+      // Someone else's Principal asked this node to do work.
+      //
+      // Journalled as a Task delegated ACROSS an ownership boundary, which is
+      // what makes the fold refuse to let this node call the work finished on
+      // its own say-so later. Within one Principal an Agent finishing its own
+      // work ends the matter; here there is a counterparty, and the whole
+      // point of P3 is that they get to disagree.
+      //
+      // `crossesOwnershipBoundary` is stated rather than inferred because only
+      // this side knows: the request arrived from another node, and
+      // `Agent.principal` is not populated anywhere yet.
+      if (fresh) {
+        // `toAgentId` is only set when the sender named an Agent on this node;
+        // most requests do not, and passing it through undefined put an Agent
+        // with no id into the fold, which then broke every projection on a
+        // sort. Whoever answers is this node's own Agent when nobody was named.
+        const respondingAgentId = toAgentId || selfAgentId()
+        observeEdge('task.created', (observer) =>
+          observer.taskCreated({
+            taskId,
+            // Deliberately not an excerpt of the request. `task.*` and
+            // `delivery.*` are publishable — unlike `conversation.*`, which the
+            // outbox filter blocks structurally — so anything put here goes to
+            // the Community. The peer is already named by
+            // `a2a.request_received`; the words are not ours to forward.
+            title: `Request from ${from}`,
+            ownerAgentId: respondingAgentId,
+          }),
+        )
+        observeEdge('task.delegated', (observer) =>
+          observer.taskDelegated({
+            taskId,
+            toAgentId: respondingAgentId,
+            fromAgentId: from,
+            grantRef: grant ? grant.grantId : undefined,
+            crossesOwnershipBoundary: true,
+          }),
+        )
+      }
       const configuration = params && params.configuration ? params.configuration : {}
       if (!fresh) {
         // Already handled. Answer with the task as it stands rather than
