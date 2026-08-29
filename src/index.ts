@@ -4679,6 +4679,30 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         }
       },
 
+      /**
+       * The Conversation as both ends would recognise it.
+       *
+       * The same view the web Chat box reads, offered to the panel so the shared
+       * thread can be read on the machine it lives on. DSH's own session view
+       * renders by role — a peer's message has to arrive as a user turn to
+       * prompt the local Agent, and DSH puts user turns on the right — so who
+       * said what is only visible in a view that reads the authorship this
+       * plugin records.
+       */
+      async conversationMessages(conversationId, cursor, limit) {
+        await conversationsReady
+        const conversation = state.conversations[conversationId]
+        if (!conversation) return { ok: false, error: 'no such conversation' }
+        const snapshot = await sessionSnapshot(conversation, cursor, Math.min(Math.max(Number(limit) || 50, 1), 200))
+        return {
+          ok: true,
+          conversationId,
+          peerLabel: conversation.peer || conversation.peerAgentId || 'Agent',
+          localAgentId: conversation.localAgentId,
+          ...snapshot,
+        }
+      },
+
       async acceptConversation(conversationId) {
         if (!conversationId) return { ok: false, error: 'conversationId is required' }
         return await acceptConversation(conversationId, { decidedBy: 'human' })
@@ -4841,6 +4865,22 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
             path: conversationWorkspace.path,
             confirmed: conversationWorkspace.confirmed,
             defaultPath: workspace,
+            /**
+             * Whether conversations are being filed somewhere other than the
+             * DSH workspace this panel is open in.
+             *
+             * Not an error — filing them where they were asked to go is the
+             * correct behaviour. But DSH groups its session list by folder, so
+             * a conversation belonging to a different one appears under
+             * 未分组, and the only reading available to a person looking at it
+             * is that something went wrong. Saying it here is the difference
+             * between a setting and a mystery.
+             */
+            elsewhere: Boolean(
+              conversationWorkspace.confirmed &&
+                conversationWorkspace.path &&
+                conversationWorkspace.path !== workspace,
+            ),
           },
           // Cached reachability, deliberately NOT probed here. The Launcher
           // polls this route every 15 seconds; probing on that path would turn

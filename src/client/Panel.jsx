@@ -191,7 +191,7 @@ function DirectoryBrowser({ picker, startPath, busy, onPicked, onCancel }) {
   )
 }
 
-function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, picker }) {
+function ConversationWorkspace({ value, defaultValue, confirmed, elsewhere, busy, onSave, picker }) {
   const [editing, setEditing] = React.useState(false)
   const [browsing, setBrowsing] = React.useState(false)
   const [path, setPath] = React.useState(value ?? defaultValue ?? '')
@@ -231,6 +231,21 @@ function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, p
         <p className="ifp-muted">新对话会写入这里；已有对话仍留在它们原来的文件夹，不会被移动或删除。</p>
       )}
       <p className="ifp-mono ifp-wrap">{current}</p>
+      {/*
+        Filing conversations somewhere other than the DSH workspace this panel
+        is open in is correct — it is what was asked for. But DSH groups its
+        session list by folder, so those conversations show up under 未分组
+        from here, and the only reading available to someone looking at that is
+        that something broke. Naming it turns a mystery back into a setting.
+      */}
+      {elsewhere ? (
+        <p className="ifp-warn">
+          这个目录不是你当前打开的 DSH 工作区（{defaultValue}）。对话会正常创建在上面那个目录里，
+          但在这里的会话列表中会显示为「未分组」——因为 DSH 按文件夹分组。
+          想让它们出现在当前工作区，把上面改成 <span className="ifp-mono">{defaultValue}</span> 即可；
+          已有对话不会被移动。
+        </p>
+      ) : null}
       {editing ? (
         <div className="ifp-actions">
           <input className="ifp-input ifp-mono" value={path} onChange={(event) => setPath(event.target.value)} placeholder="C:\\path\\to\\workspace" autoComplete="off" />
@@ -414,6 +429,7 @@ export function IFlowPanel({ state, onChanged, workspacePicker }) {
         value={conversationWorkspace.path}
         defaultValue={conversationWorkspace.defaultPath ?? state.workspaceRoot}
         confirmed={conversationWorkspace.confirmed === true}
+        elsewhere={conversationWorkspace.elsewhere === true}
         busy={busy}
         picker={workspacePicker}
         onSave={(path) => act(async () => {

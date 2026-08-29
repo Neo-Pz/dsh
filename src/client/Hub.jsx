@@ -30,12 +30,14 @@ import { api } from './api.js'
 import { AgentsTab } from './Agents.jsx'
 import { NetworkMap } from './NetworkMap.jsx'
 import { IFlowPanel } from './Panel.jsx'
+import { ChatsTab } from './Chats.jsx'
 import { RequestsTab } from './Requests.jsx'
 
 const POLL_MS = 5000
 
 const TABS = [
   { id: 'requests', label: '待处理' },
+  { id: 'chats', label: '对话' },
   { id: 'agents', label: 'Agents' },
   { id: 'network', label: '网络' },
   { id: 'transactions', label: '交易' },
@@ -149,6 +151,7 @@ export function IFlowHub({ workspacePicker } = {}) {
       </div>
 
       {active === 'requests' ? <RequestsTab onChanged={refresh} /> : null}
+      {active === 'chats' ? <ChatsTab /> : null}
       {active === 'agents' ? <AgentsTab state={state} /> : null}
       {active === 'network' ? <NetworkMap /> : null}
       {active === 'transactions' ? <Transactions /> : null}
