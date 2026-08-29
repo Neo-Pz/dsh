@@ -194,16 +194,29 @@ export function RequestsTab({ onChanged }) {
     )
   }
 
-  // Pending first, then most recently touched. Everything else is history.
-  const sorted = [...conversations].sort((a, b) => {
+  // Only what is actually waiting on a person.
+  //
+  // This page answers one question — may this Agent contact me — and an
+  // accepted thread has already answered it. Listing every conversation here
+  // made the page read as a contradiction ("nothing to handle", then thirty
+  // items) and buried the one row that did need someone. Talking to an Agent
+  // you already allowed belongs in the normal DSH session list and in Chats.
+  //
+  // Deliveries are the exception, and a different question: whether the WORK is
+  // accepted, not whether the Agent may speak. Those still need a person, so
+  // they stay.
+  const pending = conversations.filter((c) => c.state === 'pending')
+  const awaitingRuling = conversations.filter(
+    (c) => c.state !== 'pending' && (c.deliveries ?? []).length > 0,
+  )
+  const sorted = [...pending, ...awaitingRuling].sort((a, b) => {
     const aWaiting = a.state === 'pending' ? 0 : 1
     const bWaiting = b.state === 'pending' ? 0 : 1
     if (aWaiting !== bWaiting) return aWaiting - bWaiting
     return String(b.updatedAt).localeCompare(String(a.updatedAt))
   })
-  const pending = sorted.filter((c) => c.state === 'pending')
 
-  if (sorted.length === 0) {
+  if (conversations.length === 0) {
     return (
       <Card title="还没有人联系过这台机器" tone="off">
         <p>
@@ -214,32 +227,27 @@ export function RequestsTab({ onChanged }) {
     )
   }
 
+  if (sorted.length === 0) {
+    return (
+      <Card title="没有待处理的事" tone="on">
+        <p>
+          第一次联系需要你同意，之后这对 Agent 就能一直聊下去，不再回到这里。
+          已经在进行的对话在 DSH 的会话列表里，也在 iFlowOne 的 Chats 里。
+        </p>
+      </Card>
+    )
+  }
+
   return (
     <>
       <Card
-        title={pending.length > 0 ? `${pending.length} 条等你答复` : '没有待处理的事'}
-        tone={pending.length > 0 ? 'warn' : 'on'}
+        title={pending.length > 0 ? `${pending.length} 条等你答复` : `${awaitingRuling.length} 件等你验收`}
+        tone="warn"
       >
-        {/*
-          The title answers "is anything waiting on me", the list below shows
-          every conversation. Saying only "都已经答复过了" above a list of items
-          read as a contradiction — nothing to do, followed by things — so the
-          second sentence says what the list actually is.
-        */}
         <p>
           {pending.length > 0
-            ? '接受之后才会创建本地 Session、才会有模型开始处理。在此之前对方的消息只是停在这里。'
-            : '所有对话都已经答复过了。'}
-          {sorted.length > 0 ? (
-            <>
-              {' '}
-              <span className="ifp-muted">
-                {pending.length > 0
-                  ? `以下是全部 ${sorted.length} 条对话，待答复的排在前面。`
-                  : `以下是全部 ${sorted.length} 条对话，按最近有动静排序。`}
-              </span>
-            </>
-          ) : null}
+            ? '接受之后才会创建本地 Session、才会有模型开始处理。同意一次之后，这对 Agent 之后的消息就直接进来，不再回到这里。'
+            : '对方把活交回来了，等你决定收不收。这跟允许对方说话是两件事。'}
         </p>
         <ul className="ifp-list ifp-reqs">
           {sorted.map((conversation) => (

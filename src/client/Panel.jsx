@@ -23,7 +23,7 @@ import React from 'react'
 
 import { api } from './api.js'
 import { DeclareSection } from './Declare.jsx'
-import { Card } from './ui.jsx'
+import { Ago, Card } from './ui.jsx'
 
 /**
  * What crossing the boundary actually means, itemised.
@@ -246,6 +246,74 @@ function ConversationWorkspace({ value, defaultValue, confirmed, busy, onSave, p
       )}
       {browsing ? <DirectoryBrowser picker={picker} startPath={value ?? defaultValue} busy={busy} onPicked={picked} onCancel={() => setBrowsing(false)} /> : null}
       {error ? <p className="ifp-error">{error}</p> : null}
+    </Card>
+  )
+}
+
+/**
+ * Agents a person allowed to keep messaging this node.
+ *
+ * Here rather than in the posture card below it, which is deliberately
+ * read-only and says so: that file is hand-edited policy, and this list is what
+ * accumulated from clicking 接受. Something granted by a click has to be
+ * findable and withdrawable by one, or it is not really a decision.
+ */
+function AllowedPairs({ pairs, onChanged }) {
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState(null)
+
+  const revoke = async (pair) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.revokePair(pair.localAgentDid, pair.peerAgentDid)
+      if (result && result.ok === false) throw new Error(result.error ?? '撤销失败')
+      if (onChanged) await onChanged()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (pairs.length === 0) {
+    return (
+      <Card title="已授权的 Agent" tone="off">
+        <p className="ifp-muted">
+          还没有。第一次有人联系时你在「待处理」里同意，就会出现在这里——之后那对 Agent
+          可以一直说话，不再每次来问你。
+        </p>
+      </Card>
+    )
+  }
+
+  return (
+    <Card title={`已授权的 Agent（${pairs.length}）`}>
+      <p className="ifp-muted">
+        这些 Agent 可以直接给你发消息，不再进「待处理」。
+        授权只包括发消息——跑工具、花钱、验收任务都是分开的事，这里没有授予。
+      </p>
+      <ul className="ifp-list">
+        {pairs.map((pair) => (
+          <li key={`${pair.localAgentDid}|${pair.peerAgentDid}`}>
+            <div className="ifp-req-main">
+              <b>{pair.peerLabel || '未署名的 Agent'}</b>
+              <div className="ifp-muted ifp-mono ifp-wrap">{pair.peerAgentDid}</div>
+              {pair.grantedAt ? (
+                <div className="ifp-muted">
+                  你在 <Ago at={pair.grantedAt} /> 同意的
+                </div>
+              ) : null}
+            </div>
+            {/* Withdrawing decides what happens next, not what already
+                happened: open threads are left alone. */}
+            <button className="ifp-btn" disabled={busy} onClick={() => revoke(pair)}>
+              撤销
+            </button>
+          </li>
+        ))}
+      </ul>
+      {error ? <div className="ifp-error">{error}</div> : null}
     </Card>
   )
 }
@@ -536,6 +604,8 @@ export function IFlowPanel({ state, onChanged, workspacePicker }) {
           )}
         </Card>
       ) : null}
+
+      <AllowedPairs pairs={state.allowedPairs ?? []} onChanged={onChanged} />
 
       <Card title="这个节点接受什么">
         <p className="ifp-muted">

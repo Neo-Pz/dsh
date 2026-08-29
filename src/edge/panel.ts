@@ -181,6 +181,11 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.rejectConversation(body.conversationId, body.reason))
     }, { write: true })],
 
+    ['/iflow/panel/permissions/revoke', 'POST', guard(async (request, response) => {
+      const body = await readJson(request)
+      send(response, 200, await deps.revokePair(body.localAgentDid, body.peerAgentDid))
+    }, { write: true })],
+
     // Ruling on work a remote Agent handed back. A separate act from accepting
     // the conversation: agreeing to talk is not agreeing the work is done.
     ['/iflow/panel/deliveries/decide', 'POST', guard(async (request, response) => {

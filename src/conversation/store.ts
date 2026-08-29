@@ -88,7 +88,7 @@ export async function saveTrust(ctx, join, workspace, trust) {
  * person to re-approve every message of a conversation they already joined is
  * how an approval prompt becomes something people click through.
  */
-export function trustDecision(trust, { peerLabel, signerDid, conversation } = {}) {
+export function trustDecision(trust, { peerLabel, signerDid, conversation, pairMessaging } = {}) {
   // A block is absolute and is checked first: it must not be reachable around
   // by opening a new thread or by an earlier acceptance.
   if (signerDid && trust.blocked.includes(signerDid)) return 'reject'
@@ -99,6 +99,18 @@ export function trustDecision(trust, { peerLabel, signerDid, conversation } = {}
     if (conversation.state === 'accepted' || conversation.state === 'active') return 'accept'
     // `pending` falls through: it is still waiting on the same answer.
   }
+
+  // A person already said yes to this pair of Agents. The gate exists to stop a
+  // STRANGER spending a model here; once someone has looked at a first contact
+  // and allowed it, asking again on every new thread is the same question with
+  // a worse answer rate, and it trains people to click through it.
+  //
+  // Checked AFTER the block list and after a rejected thread, so neither can be
+  // walked around by reconnecting. It permits messages arriving without a
+  // prompt, and nothing else — running a tool, spending, and settling a Task
+  // are separate questions the caller must still ask separately.
+  if (pairMessaging === 'blocked') return 'reject'
+  if (pairMessaging === 'allowed') return 'accept'
 
   const named = (peerLabel && trust.peers[peerLabel]) ?? (signerDid && trust.peers[signerDid])
   const mode = named ?? trust.default

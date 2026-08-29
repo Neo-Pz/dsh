@@ -272,51 +272,44 @@ describe('the Hub', () => {
     assert.match(container.textContent, /拒绝/)
   })
 
-  it('does not say there is nothing to do above a list of things', async () => {
-    // The screenshot case: no conversation is waiting on a person, but several
-    // exist. The card's title answers "is anything waiting on me" while the
-    // list below it shows every conversation, so "所有对话都已经答复过了" on its
-    // own read as a contradiction — nothing to handle, followed by items.
-    responses['/iflow/panel/state'] = baseState({ conversationsPending: 0 })
-    responses['/iflow/panel/conversations'] = {
-      ok: true,
-      conversations: [
-        { ...PENDING_CONVERSATION, conversationId: 'conv-a', state: 'accepted', peer: 'weww', preview: 'hi' },
-        { ...PENDING_CONVERSATION, conversationId: 'conv-b', state: 'accepted', peer: 'if-dsk', preview: '双向回执' },
-      ],
-    }
-    await mount(slots.get('settings.section'))
-    // With nothing waiting the Hub opens elsewhere, which is correct — but it
-    // means this tab has to be asked for.
-    await clickTab('待处理')
-
-    assert.match(container.textContent, /没有待处理的事/)
-    assert.match(container.textContent, /以下是全部 2 条对话/, 'the list is never introduced')
-    // Still actually listing them, which is the whole reason the sentence is needed.
-    assert.match(container.textContent, /weww/)
-    assert.match(container.textContent, /if-dsk/)
-
-    responses['/iflow/panel/state'] = baseState()
-    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
-  })
-
-  it('counts the whole list, not the part that is waiting', async () => {
-    // With one pending among three, the heading counts 1 and the sentence
-    // counts 3. Conflating them is the same defect wearing different numbers.
+  it('shows only what is actually waiting on a person', async () => {
+    // This page answers one question: may this Agent contact me. A thread that
+    // was already accepted has answered it, and listing it here both read as a
+    // contradiction and buried the row that did need someone.
     responses['/iflow/panel/state'] = baseState({ conversationsPending: 1 })
     responses['/iflow/panel/conversations'] = {
       ok: true,
       conversations: [
-        PENDING_CONVERSATION,
-        { ...PENDING_CONVERSATION, conversationId: 'conv-c', state: 'accepted', peer: 'x' },
-        { ...PENDING_CONVERSATION, conversationId: 'conv-d', state: 'closed', peer: 'y' },
+        { ...PENDING_CONVERSATION, conversationId: 'conv-new', state: 'pending', peer: 'stranger' },
+        { ...PENDING_CONVERSATION, conversationId: 'conv-old', state: 'accepted', peer: 'weww' },
+        { ...PENDING_CONVERSATION, conversationId: 'conv-done', state: 'closed', peer: 'if-dsk' },
       ],
     }
     await mount(slots.get('settings.section'))
     await clickTab('待处理')
 
     assert.match(container.textContent, /1 条等你答复/)
-    assert.match(container.textContent, /以下是全部 3 条对话，待答复的排在前面/)
+    assert.match(container.textContent, /stranger/)
+    assert.equal(container.textContent.includes('weww'), false, 'an accepted thread is still listed here')
+    assert.equal(container.textContent.includes('if-dsk'), false, 'a closed thread is still listed here')
+
+    responses['/iflow/panel/state'] = baseState()
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
+  it('says the permission is standing, not per message', async () => {
+    // The whole reason the list shrank: accepting once allows the pair, so a
+    // person should not expect to see them here again.
+    responses['/iflow/panel/state'] = baseState({ conversationsPending: 0 })
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [{ ...PENDING_CONVERSATION, conversationId: 'conv-old', state: 'accepted', peer: 'weww' }],
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('待处理')
+
+    assert.match(container.textContent, /没有待处理的事/)
+    assert.match(container.textContent, /不再回到这里/)
 
     responses['/iflow/panel/state'] = baseState()
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
@@ -383,6 +376,46 @@ describe('the Hub', () => {
 
     responses['/iflow/panel/state'] = baseState()
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
+  it('lists Agents allowed to keep messaging, and offers to take it back', async () => {
+    // Something granted by a click has to be findable and withdrawable by one,
+    // or it is not really a decision — it is a consequence.
+    responses['/iflow/panel/state'] = baseState({
+      allowedPairs: [
+        {
+          localAgentDid: 'did:key:zLocal',
+          peerAgentDid: 'did:key:zPeer',
+          peerLabel: 'wwee',
+          grantedAt: '2026-08-24T10:00:00.000Z',
+        },
+      ],
+    })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.match(container.textContent, /已授权的 Agent（1）/)
+    assert.match(container.textContent, /wwee/)
+    // States the boundary where someone reads it: allowing messages is not
+    // allowing anything else.
+    assert.match(container.textContent, /跑工具、花钱、验收任务都是分开的事/)
+    assert.ok(
+      [...container.querySelectorAll('button')].some((b) => b.textContent === '撤销'),
+      'no way to withdraw a standing permission',
+    )
+
+    responses['/iflow/panel/state'] = baseState()
+  })
+
+  it('says how permission gets granted when none has been', async () => {
+    responses['/iflow/panel/state'] = baseState({ allowedPairs: [] })
+    await mount(slots.get('settings.section'))
+    await clickTab('我')
+
+    assert.match(container.textContent, /还没有/)
+    assert.match(container.textContent, /不再每次来问你/)
+
+    responses['/iflow/panel/state'] = baseState()
   })
 
   it('shows peers and declared Agents', async () => {
