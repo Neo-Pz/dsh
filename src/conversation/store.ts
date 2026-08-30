@@ -94,6 +94,12 @@ export function trustDecision(trust, { peerLabel, signerDid, conversation, pairM
   if (signerDid && trust.blocked.includes(signerDid)) return 'reject'
   if (peerLabel && trust.blocked.includes(peerLabel)) return 'reject'
 
+  // A revoked pair is not a permanent block.  It is a person taking back the
+  // standing answer that made an active thread automatic.  It has to win over
+  // that thread's historical `accepted` state or revocation would only affect
+  // imaginary future threads while the real one kept spending this machine.
+  if (pairMessaging === 'revoked') return 'ask'
+
   if (conversation) {
     if (conversation.state === 'rejected' || conversation.state === 'closed') return 'reject'
     if (conversation.state === 'accepted' || conversation.state === 'active') return 'accept'
@@ -109,7 +115,6 @@ export function trustDecision(trust, { peerLabel, signerDid, conversation, pairM
   // walked around by reconnecting. It permits messages arriving without a
   // prompt, and nothing else — running a tool, spending, and settling a Task
   // are separate questions the caller must still ask separately.
-  if (pairMessaging === 'blocked') return 'reject'
   if (pairMessaging === 'allowed') return 'accept'
 
   const named = (peerLabel && trust.peers[peerLabel]) ?? (signerDid && trust.peers[signerDid])
@@ -165,6 +170,9 @@ function normalize(id, value) {
     mode: value.mode === 'assisted' ? 'assisted' : 'direct',
     active: value.active !== false,
     state: typeof value.state === 'string' ? value.state : 'pending',
+    communicationState: value.communicationState === 'reauthorization_required'
+      ? 'reauthorization_required'
+      : 'active',
     binding: value.binding && typeof value.binding === 'object' ? value.binding : null,
     pendingTask: value.pendingTask ?? null,
     preview: typeof value.preview === 'string' ? value.preview : '',
@@ -225,6 +233,7 @@ export function newConversation(id, {
     mode: mode === 'assisted' ? 'assisted' : 'direct',
     active: true,
     state: state ?? 'pending',
+    communicationState: 'active',
     binding: null,
     pendingTask: null,
     // Local only, and the reason IncomingRequest's excerpt never appears in a

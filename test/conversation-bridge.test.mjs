@@ -232,6 +232,71 @@ function readConversations(workspace) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
 
+describe('the scoped first-contact reset', () => {
+  it('erases only one pair’s local bindings and leaves identity, peers, trust and other chats alone', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'iflow-reset-pair-'))
+    const local = `did:key:z${'A'.repeat(42)}`
+    const peer = `did:key:z${'B'.repeat(42)}`
+    const otherPeer = `did:key:z${'C'.repeat(42)}`
+    const iflow = join(workspace, '.iflow')
+    mkdirSync(iflow, { recursive: true })
+    writeFileSync(join(iflow, 'conversations.json'), JSON.stringify({
+      conversations: {
+        'conv-reset': {
+          localAgentAuthorityDid: local, peerAgentAuthorityDid: peer, peer: 'wwee', state: 'active',
+          binding: { runtime: 'dsh', workspaceId: workspace, localSessionId: 'session-keep-history' },
+        },
+        'conv-keep': {
+          localAgentAuthorityDid: local, peerAgentAuthorityDid: otherPeer, peer: 'other', state: 'active',
+          binding: { runtime: 'dsh', workspaceId: workspace, localSessionId: 'session-other' },
+        },
+      },
+    }))
+    writeFileSync(join(iflow, 'permissions.json'), JSON.stringify({
+      pairs: {
+        ignored: { localAgentDid: local, peerAgentDid: peer, messaging: 'allowed' },
+        other: { localAgentDid: local, peerAgentDid: otherPeer, messaging: 'allowed' },
+      },
+    }))
+    writeFileSync(join(iflow, 'mailbox.json'), JSON.stringify({
+      outbox: [{ conversationId: 'conv-reset' }, { conversationId: 'conv-keep' }], inbox: [],
+    }))
+    // These are deliberately unrelated storage classes. reset_pair must not
+    // turn a repeatable chat test into a fresh installation.
+    for (const name of ['identity.json', 'principal-binding.json', 'agents.json', 'community.json', 'peers.json', 'trust.json']) {
+      writeFileSync(join(iflow, name), JSON.stringify({ preserved: name }))
+    }
+    mkdirSync(join(iflow, 'edge'), { recursive: true })
+    writeFileSync(join(iflow, 'edge', 'origin.ndjson'), '{"type":"agent.declared"}\n')
+    const host = createHost(workspace)
+    const plugin = (await import(BUNDLE)).default
+    plugin.apply(host.ctx, { conversationWorkspace: workspace })
+    await waitFor(() => host.tools.has('iflow_conversations'), 'the conversation tool to mount')
+    try {
+      const reset = await host.tools.get('iflow_conversations').execute({
+        action: 'reset_pair', localAgentDid: local, peerAgentDid: peer, confirm: 'RESET_PAIR',
+      })
+      assert.equal(reset.ok, true)
+      assert.equal(reset.conversations, 1)
+      const after = readConversations(workspace).conversations
+      assert.equal(after['conv-reset'], undefined)
+      assert.ok(after['conv-keep'], 'another pair’s conversation was deleted')
+      const permissions = JSON.parse(readFileSync(join(iflow, 'permissions.json'), 'utf8')).pairs
+      assert.equal(Object.values(permissions).some((row) => row.peerAgentDid === peer), false)
+      assert.equal(Object.values(permissions).some((row) => row.peerAgentDid === otherPeer), true)
+      const mailbox = JSON.parse(readFileSync(join(iflow, 'mailbox.json'), 'utf8'))
+      assert.equal(mailbox.outbox.some((row) => row.conversationId === 'conv-reset'), false)
+      assert.equal(mailbox.outbox.some((row) => row.conversationId === 'conv-keep'), true)
+      for (const name of ['identity.json', 'principal-binding.json', 'agents.json', 'community.json', 'peers.json', 'trust.json']) {
+        assert.equal(JSON.parse(readFileSync(join(iflow, name), 'utf8')).preserved, name, `${name} was touched`)
+      }
+      assert.equal(readFileSync(join(iflow, 'edge', 'origin.ndjson'), 'utf8'), '{"type":"agent.declared"}\n', 'the Edge Journal was touched')
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('scenario A — first contact waits for a person', () => {
   it('parks an unknown agent without starting a session, then delivers on accept', async () => {
     const { workspace, host, cleanup } = await boot()

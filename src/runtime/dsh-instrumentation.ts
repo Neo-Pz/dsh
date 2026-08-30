@@ -332,7 +332,6 @@ export function installDshInstrumentation(ctx, edge, options = {}) {
           await observer.goalCreated({
             goalId: goalIdOf(entry.rootSessionId),
             title,
-            issuer: { id: 'user', kind: 'human' },
             roomId: entry.roomId,
           })
         }
@@ -421,6 +420,7 @@ export function installDshInstrumentation(ctx, edge, options = {}) {
         await observer.approvalResolved({
           approvalId,
           decision: normalizeApprovalOutcome(event.data.outcome),
+          decidedBy: 'human',
           agentId: open.agentId,
           taskId: open.taskId,
         })

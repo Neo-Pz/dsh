@@ -39,11 +39,14 @@ export async function loadPermissions(ctx, join, workspace) {
     const resolved = await ctx.fs.resolve(permissionsPath(join, workspace))
     const data = JSON.parse(await ctx.fs.readText(resolved))
     const pairs = {}
-    for (const [key, value] of Object.entries(data?.pairs ?? {})) {
+    for (const value of Object.values(data?.pairs ?? {})) {
       if (!value || typeof value !== 'object') continue
       if (typeof value.localAgentDid !== 'string' || typeof value.peerAgentDid !== 'string') continue
       if (value.messaging !== 'allowed' && value.messaging !== 'blocked') continue
-      pairs[key] = {
+      // The on-disk property is an implementation detail. Re-key by the two
+      // proved DIDs while loading so an older/manual file cannot make a real
+      // revoked pair look absent merely because its map key was different.
+      pairs[pairKey(value.localAgentDid, value.peerAgentDid)] = {
         localAgentDid: value.localAgentDid,
         peerAgentDid: value.peerAgentDid,
         peerLabel: typeof value.peerLabel === 'string' ? value.peerLabel : null,
@@ -76,10 +79,27 @@ export async function savePermissions(ctx, join, workspace, permissions) {
  * stranger still stops at the gate.
  */
 export function messagingPermission(permissions, localAgentDid, peerAgentDid) {
+  return pairMessagingState(permissions, localAgentDid, peerAgentDid) === 'allowed'
+    ? 'allowed'
+    : null
+}
+
+/**
+ * The local communication state of a pair.
+ *
+ * `revoked` is deliberately different from a pair this Node has never seen.
+ * The former is a person taking back a previous decision and must pause an
+ * already active Conversation until they look again; the latter falls through
+ * to the normal trust posture.  Keeping this distinction here, at the sole
+ * persistence boundary, stops a legacy `blocked + revokedAt` row from quietly
+ * becoming an absent row after a restart.
+ */
+export function pairMessagingState(permissions, localAgentDid, peerAgentDid) {
   if (!localAgentDid || !peerAgentDid) return null
   const pair = permissions.pairs[pairKey(localAgentDid, peerAgentDid)]
-  if (!pair || pair.revokedAt) return null
-  return pair.messaging
+  if (!pair) return null
+  if (pair.revokedAt || pair.messaging === 'blocked') return 'revoked'
+  return pair.messaging === 'allowed' ? 'allowed' : null
 }
 
 /**
@@ -116,6 +136,24 @@ export function revokePair(permissions, localAgentDid, peerAgentDid, now) {
   if (!pair || pair.revokedAt) return null
   pair.revokedAt = now ?? new Date().toISOString()
   pair.messaging = 'blocked'
+  return pair
+}
+
+/**
+ * Remove exactly one pair for an isolated first-contact test.
+ *
+ * This is intentionally not a "clear permissions" operation: a node may
+ * know many people, and resetting one test pair must never erase somebody
+ * else's local decision.  Unlike revokePair this erases the audit row too,
+ * so callers are restricted diagnostic code that also removes that pair's
+ * local Conversation bindings.
+ */
+export function forgetPair(permissions, localAgentDid, peerAgentDid) {
+  if (!localAgentDid || !peerAgentDid) return null
+  const key = pairKey(localAgentDid, peerAgentDid)
+  const pair = permissions.pairs[key]
+  if (!pair) return null
+  delete permissions.pairs[key]
   return pair
 }
 

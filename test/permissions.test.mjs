@@ -20,8 +20,10 @@ const {
   allowPair,
   allowedPairs,
   emptyPermissions,
+  forgetPair,
   loadPermissions,
   messagingPermission,
+  pairMessagingState,
   permissionsPath,
   revokePair,
 } = perms
@@ -100,6 +102,7 @@ describe('revoking', () => {
     const permissions = granted()
     assert.ok(revokePair(permissions, LOCAL, PEER))
     assert.equal(messagingPermission(permissions, LOCAL, PEER), null)
+    assert.equal(pairMessagingState(permissions, LOCAL, PEER), 'revoked')
   })
 
   it('keeps the record rather than deleting it', () => {
@@ -123,6 +126,15 @@ describe('revoking', () => {
     assert.equal(allowedPairs(permissions).length, 1)
     revokePair(permissions, LOCAL, PEER)
     assert.deepEqual(allowedPairs(permissions), [])
+  })
+
+  it('can erase exactly one pair for a scoped first-contact test', () => {
+    const permissions = granted()
+    const other = 'did:key:zOtherAgent'
+    allowPair(permissions, { localAgentDid: LOCAL, peerAgentDid: other, peerLabel: 'other' })
+    assert.ok(forgetPair(permissions, LOCAL, PEER))
+    assert.equal(pairMessagingState(permissions, LOCAL, PEER), null)
+    assert.equal(pairMessagingState(permissions, LOCAL, other), 'allowed')
   })
 })
 
@@ -150,6 +162,14 @@ describe('what the permission does to the gate', () => {
     assert.equal(
       trustDecision(DEFAULT_TRUST, { signerDid: PEER, conversation: rejected, pairMessaging: 'allowed' }),
       'reject',
+    )
+  })
+
+  it('makes an active conversation ask again after a local revocation', () => {
+    const active = { state: 'active' }
+    assert.equal(
+      trustDecision(DEFAULT_TRUST, { signerDid: PEER, conversation: active, pairMessaging: 'revoked' }),
+      'ask',
     )
   })
 })
@@ -186,5 +206,20 @@ describe('surviving a restart', () => {
       }),
     })
     assert.deepEqual((await loadPermissions(ctx, join, WORKSPACE)).pairs, {})
+  })
+
+  it('reads the legacy blocked plus revokedAt representation as revoked', async () => {
+    const ctx = fakeFs({
+      [permissionsPath(join, WORKSPACE)]: JSON.stringify({
+        pairs: {
+          old: {
+            localAgentDid: LOCAL, peerAgentDid: PEER, messaging: 'blocked',
+            revokedAt: '2026-08-30T00:00:00.000Z', grantedBy: 'human',
+          },
+        },
+      }),
+    })
+    const loaded = await loadPermissions(ctx, join, WORKSPACE)
+    assert.equal(pairMessagingState(loaded, LOCAL, PEER), 'revoked')
   })
 })

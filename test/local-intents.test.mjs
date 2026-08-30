@@ -182,6 +182,30 @@ describe('Local Intent durability and authority boundary', () => {
     assert.equal(h.cryptoCalls.filter((call) => call.kind === 'seal' && call.text.includes('private answer')).length, 2)
     assert.doesNotMatch(JSON.stringify(h.store.value()), /private answer/)
   })
+
+  it('forgets only queue records bound to a reset pair’s Conversations', async () => {
+    const h = harness({ plaintext: () => direct({ conversationId: 'conv-reset' }) })
+    await h.queue.accept([envelope()]); await h.queue.process()
+    // A second record is intentionally unrelated and must survive reset.
+    const original = h.store.value()
+    original.intents.push({
+      intentId: 'unrelated', principalId: 'iflow:principal:owner', browserSessionId: 'browser-else',
+      ownAgentId: 'own-agent', ownAgentAuthorityDid: 'did:key:zOwnAgent',
+      state: 'sent', conversationId: 'conv-keep', updatedAt: NOW.toISOString(),
+    })
+    original.viewBindings.push({
+      key: 'keep', principalId: 'iflow:principal:owner', ownAgentId: 'own-agent', browserSessionId: 'browser-else',
+      conversationId: 'conv-keep', anchorIntentId: 'unrelated', viewPublicKey: 'did:key:zKeep',
+      expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+    })
+    const store = memoryStore(original)
+    const queue = new LocalIntentQueue({ store, clock: () => new Date(NOW), crypto: {}, executeIntent: async () => ({ ok: true }), postView: async () => {} })
+    const removed = await queue.forgetConversations(['conv-reset'])
+    assert.deepEqual(removed, { intents: 1, bindings: 1 })
+    assert.equal(store.value().intents.some((entry) => entry.conversationId === 'conv-reset'), false)
+    assert.equal(store.value().intents.some((entry) => entry.conversationId === 'conv-keep'), true)
+    assert.equal(store.value().viewBindings.some((entry) => entry.conversationId === 'conv-keep'), true)
+  })
 })
 
 describe('P0 conversation Intent contract', () => {

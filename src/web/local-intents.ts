@@ -315,6 +315,28 @@ export class LocalIntentQueue {
     return delivered > 0
   }
 
+  /**
+   * Forget only browser-local queue records bound to selected Conversations.
+   * Used by the deliberately narrow `reset_pair` diagnostic action; it cannot
+   * touch another Agent's queue, identity material, or anything Community
+   * stored.  Unbound ciphertext remains queued because its target pair cannot
+   * be known without opening it as the local Agent.
+   */
+  async forgetConversations(conversationIds) {
+    await this.open()
+    const ids = new Set(Array.isArray(conversationIds) ? conversationIds.filter(Boolean) : [])
+    if (ids.size === 0) return { intents: 0, bindings: 0 }
+    const beforeIntents = this.data.intents.length
+    const beforeBindings = this.data.viewBindings.length
+    this.data.intents = this.data.intents.filter((record) => !ids.has(record.conversationId))
+    this.data.viewBindings = this.data.viewBindings.filter((binding) => !ids.has(binding.conversationId))
+    await this.persist()
+    return {
+      intents: beforeIntents - this.data.intents.length,
+      bindings: beforeBindings - this.data.viewBindings.length,
+    }
+  }
+
   async status() {
     await this.open()
     return this.data.intents.map(({ envelope: _sealed, viewPublicKey: _key, ...record }) => ({ ...record }))

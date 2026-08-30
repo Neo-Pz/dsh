@@ -276,6 +276,22 @@ describe('the Hub', () => {
     assert.match(container.textContent, /拒绝/)
   })
 
+  it('calls a revoked pair what it is: a re-authorization, not a new stranger', async () => {
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [{
+        ...PENDING_CONVERSATION,
+        communicationState: 'reauthorization_required',
+        peer: 'wwee',
+      }],
+    }
+    await mount(slots.get('settings.section'))
+    assert.match(container.textContent, /等待重新授权/)
+    assert.match(container.textContent, /通信许可已撤销/)
+
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
   it('shows only what is actually waiting on a person', async () => {
     // This page answers one question: may this Agent contact me. A thread that
     // was already accepted has answered it, and listing it here both read as a
@@ -511,6 +527,26 @@ describe('the Hub', () => {
     assert.ok(lines[2].classList.contains('mine'))
     assert.match(lines[2].textContent, /🤖/)
     assert.equal(lines[2].textContent.includes('经由'), false, 'an Agent’s own words were attributed to a person')
+
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+  })
+
+  it('marks a paused Chat as non-sendable without hiding its history', async () => {
+    responses['/iflow/panel/conversations'] = {
+      ok: true,
+      conversations: [{
+        ...PENDING_CONVERSATION,
+        state: 'active', peer: 'wwee', communicationState: 'reauthorization_required',
+      }],
+    }
+    await mount(slots.get('settings.section'))
+    await clickTab('对话')
+    const row = [...container.querySelectorAll('button')].find((button) => button.textContent.includes('wwee'))
+    assert.ok(row)
+    await React.act(async () => row.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    await settle()
+    assert.match(container.textContent, /通信许可已撤销/)
+    assert.match(container.textContent, /不能发送/)
 
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })

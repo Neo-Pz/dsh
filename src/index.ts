@@ -49,8 +49,9 @@ import {
   allowPair,
   allowedPairs,
   emptyPermissions,
+  forgetPair,
   loadPermissions,
-  messagingPermission,
+  pairMessagingState,
   revokePair,
   savePermissions,
 } from './conversation/permissions.js'
@@ -436,6 +437,19 @@ export default {
       return identityCache && identityCache.did ? identityCache.did : null
     }
 
+    /**
+     * A local person may pause a pair without destroying its history.  Keep
+     * this check at the Node boundary, shared by the panel, web intents and
+     * relay sends: no caller gets a side route around a revoked permission.
+     */
+    function pairCommunicationState(localAgentDid, peerAgentDid) {
+      return pairMessagingState(state.permissions, localAgentDid, peerAgentDid)
+    }
+
+    function conversationReauthorizationError() {
+      return 'conversation_reauthorization_required'
+    }
+
     function selfAgentId() {
       return edgeHandle ? edgeHandle.edge.descriptor.selfAgentId : `node-${state.alias}`
     }
@@ -712,6 +726,9 @@ export default {
       if (!toAgentId || !toAgentAuthorityDid) {
         return { ok: false, error: 'the target Agent id and current Authority DID are required' }
       }
+      if (pairCommunicationState(fromAgent.did, toAgentAuthorityDid) === 'revoked') {
+        return { ok: false, error: conversationReauthorizationError() }
+      }
       const fromDid = fromAgent.did
       const request = {
         jsonrpc: '2.0',
@@ -958,6 +975,10 @@ ${text}`)
         const declarations = await loadDeclarations(ctx, join, workspace)
         const respondingAgent = declarations.agents.find((agent) => agent.agentId === task.replyTo.respondingAgentId)
         if (!respondingAgent) throw new Error('the responding Agent is no longer declared on this Node')
+        if (pairCommunicationState(respondingAgent.did, task.replyTo.did) === 'revoked') {
+          console.log(`iFlow relay: answer for ${taskId} remains local because ${conversationReauthorizationError()}`)
+          return
+        }
         const bodyPath = scratchPath(`relay-reply-${messageId}.json`)
         await ctx.fs.writeText(await ctx.fs.resolve(bodyPath), body)
         let signature
@@ -1870,18 +1891,18 @@ ${text}`)
       // The pair permission is keyed on what the far side PROVED, not on the
       // label it sent: `signerDid` comes from a verified signature, and an
       // unsigned peer has no durable identity to have been granted anything.
+      const pairState = pairCommunicationState(
+        // The declared Agent the sender addressed, when it named one;
+        // otherwise this node's own identity. Both are stable across restarts,
+        // which is what a standing permission needs.
+        toAgentAuthorityDid || selfAuthorityDid(),
+        signerDid,
+      )
       const decision = trustDecision(state.trust, {
         peerLabel: from,
         signerDid,
         conversation,
-        pairMessaging: messagingPermission(
-          state.permissions,
-          // The declared Agent the sender addressed, when it named one;
-          // otherwise this node's own identity. Both are stable across
-          // restarts, which is what a standing permission needs.
-          toAgentAuthorityDid || selfAuthorityDid(),
-          signerDid,
-        ),
+        pairMessaging: pairState,
       })
       const task = {
         id: taskId,
@@ -1979,7 +2000,7 @@ ${text}`)
           observeEdge('conversation.rejected', (observer) =>
             observer.conversationRejected({
               conversationId,
-              rejectedBy: selfAgentId(),
+              rejectedByAgentId: selfAgentId(),
               decidedBy: 'policy',
             }),
           )
@@ -1995,6 +2016,12 @@ ${text}`)
         // causes work here until a person says so. What is kept is the message
         // itself, so that accepting later delivers it rather than losing it.
         conversation.state = 'pending'
+        // A revoked pair is a different kind of pending request from a first
+        // contact.  The old local Session and history remain exactly where
+        // they were; only its permission to execute is paused.
+        conversation.communicationState = pairState === 'revoked'
+          ? 'reauthorization_required'
+          : 'active'
         conversation.pendingTask = { taskId, text, from: from ?? null, messageId, actorType, origin }
         conversation.preview = text.slice(0, 200)
         void persistConversations()
@@ -2015,7 +2042,7 @@ ${text}`)
 
       if (conversation.state === 'pending') {
         observeEdge('conversation.accepted', (observer) =>
-          observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy: 'policy' }),
+          observer.conversationAccepted({ conversationId, acceptedByAgentId: selfAgentId(), decidedBy: 'policy' }),
         )
       }
       if (firstSighting) {
@@ -2031,7 +2058,7 @@ ${text}`)
       void persistConversations()
 
       const controller = makeAbortController()
-      state.outgoing.set(taskId, { controller, done: undefined })
+      state.outgoing.set(taskId, { controller, done: undefined, conversationId })
       const done = runChild(taskId, text, controller, from, {
         conversationId,
         messageId,
@@ -2065,6 +2092,7 @@ ${text}`)
         return { ok: false, error: `conversation ${conversationId} is ${conversation.state}, not pending` }
       }
       conversation.state = 'accepted'
+      conversation.communicationState = 'active'
       const parked = conversation.pendingTask
       conversation.pendingTask = null
       await persistConversations()
@@ -2095,7 +2123,7 @@ ${text}`)
       }
 
       observeEdge('conversation.accepted', (observer) =>
-        observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy }),
+        observer.conversationAccepted({ conversationId, acceptedByAgentId: selfAgentId(), decidedBy }),
       )
       observeEdge('relation.recorded', (observer) =>
         observer.relationRecorded({
@@ -2116,7 +2144,7 @@ ${text}`)
       conversation.state = 'active'
       await persistConversations()
       const controller = makeAbortController()
-      state.outgoing.set(parked.taskId, { controller, done: undefined })
+      state.outgoing.set(parked.taskId, { controller, done: undefined, conversationId })
       const done = runChild(parked.taskId, parked.text, controller, parked.from ?? undefined, {
         conversationId,
         messageId: parked.messageId,
@@ -2133,14 +2161,19 @@ ${text}`)
       await conversationsReady
       const conversation = state.conversations[conversationId]
       if (!conversation) return { ok: false, error: `unknown conversation: ${conversationId}` }
-      conversation.state = 'rejected'
+      const reauthorization = conversation.communicationState === 'reauthorization_required'
+      // Declining a re-authorization is not a permanent block.  Leave the
+      // original thread in place and let the pair stay paused, so another
+      // incoming attempt is held again rather than silently changing a
+      // reversible pause into an irreversible rejection.
+      conversation.state = reauthorization ? 'active' : 'rejected'
       const parked = conversation.pendingTask
       conversation.pendingTask = null
       await persistConversations()
       observeEdge('conversation.rejected', (observer) =>
         observer.conversationRejected({
           conversationId,
-          rejectedBy: selfAgentId(),
+          rejectedByAgentId: selfAgentId(),
           decidedBy: 'human',
           reason,
         }),
@@ -2149,7 +2182,68 @@ ${text}`)
       if (parked && state.tasks.has(parked.taskId)) {
         setStatus(parked.taskId, 'TASK_STATE_REJECTED', reason || 'The operator declined this conversation.')
       }
-      return { ok: true, conversationId, state: 'rejected' }
+      return { ok: true, conversationId, state: reauthorization ? 'reauthorization_required' : 'rejected' }
+    }
+
+    function belongsToPair(conversation, localAgentDid, peerAgentDid) {
+      const localDid = conversation.localAgentAuthorityDid || null
+      const remoteDid = conversation.peerAgentAuthorityDid || conversation.peerDid || null
+      return localDid === localAgentDid && remoteDid === peerAgentDid
+    }
+
+    /**
+     * Test-only, exact-pair reset.
+     *
+     * This is intentionally narrower than a "reset iFlow" button.  It clears
+     * the selected pair's private bindings and locally queued records so a
+     * two-Node first-contact test is repeatable, while preserving the Node's
+     * identity, declared Agents, peer routes, trust posture, event journal and
+     * every other Conversation. Community has no pair permission to clear.
+     */
+    async function resetPair(localAgentDid, peerAgentDid, confirmation) {
+      await conversationsReady
+      if (confirmation !== 'RESET_PAIR') {
+        return { ok: false, error: 'reset_pair requires confirm: RESET_PAIR' }
+      }
+      if (!looksLikeDid(localAgentDid) || !looksLikeDid(peerAgentDid)) {
+        return { ok: false, error: 'reset_pair requires exact localAgentDid and peerAgentDid did:key values' }
+      }
+
+      const conversationIds = Object.values(state.conversations)
+        .filter((conversation) => belongsToPair(conversation, localAgentDid, peerAgentDid))
+        .map((conversation) => conversation.conversationId)
+      const ids = new Set(conversationIds)
+
+      // Stop only work already tied to this pair.  This avoids a revoke/reset
+      // race producing a reply after the local person has paused communication.
+      for (const active of state.outgoing.values()) {
+        if (ids.has(active.conversationId)) active.controller?.abort?.(new Error('pair reset by local operator'))
+      }
+      for (const id of conversationIds) delete state.conversations[id]
+      if (conversationIds.length > 0) await persistConversations()
+
+      const permission = forgetPair(state.permissions, localAgentDid, peerAgentDid)
+      if (permission) await persistPermissions()
+
+      const mailbox = await loadMailbox()
+      const oldOutbox = mailbox.outbox.length
+      const oldInbox = mailbox.inbox.length
+      mailbox.outbox = mailbox.outbox.filter((item) => !ids.has(item.conversationId))
+      mailbox.inbox = mailbox.inbox.filter((item) => !ids.has(item.conversationId))
+      if (mailbox.outbox.length !== oldOutbox || mailbox.inbox.length !== oldInbox) await saveMailbox(mailbox)
+
+      const web = webIntentQueue
+        ? await webIntentQueue.forgetConversations(conversationIds)
+        : { intents: 0, bindings: 0 }
+      return {
+        ok: true,
+        localAgentDid,
+        peerAgentDid,
+        conversations: conversationIds.length,
+        permissionRemoved: Boolean(permission),
+        mailbox: { outbox: oldOutbox - mailbox.outbox.length, inbox: oldInbox - mailbox.inbox.length },
+        web,
+      }
     }
 
     function handleGetTask(params) {
@@ -2645,12 +2739,15 @@ ${text}`)
         description:
           'iFlow: see conversations with other agents and answer the ones waiting on you. ' +
           'A first message from an unknown agent is held — no session, no model, no tools — until you accept it here. ' +
-          'Actions: list (default), accept, reject, trust (auto-accept a peer from now on), block.',
+          'Actions: list (default), accept, reject, trust (auto-accept a peer from now on), block, reset_pair (local diagnostic only).',
         parameters: {
-          action: { type: 'string', description: "'list' | 'accept' | 'reject' | 'trust' | 'block'. Default 'list'." },
+          action: { type: 'string', description: "'list' | 'accept' | 'reject' | 'trust' | 'block' | 'reset_pair'. Default 'list'." },
           conversationId: { type: 'string', description: 'Which conversation to accept or reject.' },
           peer: { type: 'string', description: 'Peer name or did:key, for trust and block.' },
           reason: { type: 'string', description: 'Optional reason recorded with a rejection.' },
+          localAgentDid: { type: 'string', description: 'Exact local Agent did:key, required by reset_pair.' },
+          peerAgentDid: { type: 'string', description: 'Exact remote Agent did:key, required by reset_pair.' },
+          confirm: { type: 'string', description: 'For reset_pair, exactly RESET_PAIR.' },
         },
         output: {
           schema: {
@@ -2714,6 +2811,7 @@ ${text}`)
                 conversationId: c.conversationId,
                 peer: c.peer ?? undefined,
                 state: c.state,
+                communicationState: c.communicationState,
                 preview: c.preview || undefined,
                 // Shown locally and only locally: this is the Runtime-private
                 // half of the mapping and it never goes on the wire.
@@ -2734,6 +2832,10 @@ ${text}`)
           if (action === 'reject') {
             if (!args.conversationId) return { ok: false, error: 'reject needs a conversationId' }
             return await rejectConversation(args.conversationId, args.reason)
+          }
+
+          if (action === 'reset_pair') {
+            return await resetPair(args.localAgentDid, args.peerAgentDid, args.confirm)
           }
 
           if (action === 'trust' || action === 'block') {
@@ -3016,6 +3118,13 @@ ${text}`)
           const base = entry.url
           const token = entry.token
           await conversationsReady
+          if (entry.did && pairCommunicationState(fromAgent.did, entry.did) === 'revoked') {
+            return {
+              ok: false,
+              peer: args.peer,
+              error: conversationReauthorizationError(),
+            }
+          }
           // Continue a named thread, or start one. Either way the id travels as
           // the A2A `contextId`, which is where a peer already looks for it.
           // Continuing beats starting. A caller naming a thread gets that
@@ -3055,7 +3164,7 @@ ${text}`)
             observeEdge('conversation.accepted', (observer) =>
               observer.conversationAccepted({
                 conversationId,
-                acceptedBy: selfAgentId(),
+                acceptedByAgentId: selfAgentId(),
                 decidedBy: 'policy',
               }),
             )
@@ -4262,6 +4371,10 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         if (!conversation || conversation.localAgentId !== ownAgentId) {
           throw new IntentPolicyError('Draft is not owned by the selected Agent', 'draft_unavailable')
         }
+        if (intent.decision === 'confirm' &&
+          pairCommunicationState(ownAgentAuthorityDid, conversation.peerAgentAuthorityDid || conversation.peerDid) === 'revoked') {
+          throw new IntentPolicyError('This conversation needs local re-authorization before it can send', conversationReauthorizationError())
+        }
         const draft = decideDraft(conversation, intent.draftId, intent.decision, iso())
         if (!draft) throw new IntentPolicyError('Draft is missing, expired or already decided', 'draft_unavailable')
         await persistConversations()
@@ -4296,6 +4409,9 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       let conversation = intent.conversationId ? state.conversations[intent.conversationId] : undefined
       if (!conversation && !intent.conversationId) {
         conversation = findActiveConversation(state.conversations, ownAgentId, intent.targetAgentId)
+      }
+      if (pairCommunicationState(ownAgentAuthorityDid, intent.targetAgentAuthorityDid) === 'revoked') {
+        throw new IntentPolicyError('This conversation needs local re-authorization before it can send', conversationReauthorizationError())
       }
       const starting = !conversation
       const conversationId = conversation?.conversationId ?? intent.conversationId ?? `conv-${uid('c')}`
@@ -4665,6 +4781,7 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
               peer: c.peer,
               peerDid: c.peerDid,
               state: c.state,
+              communicationState: c.communicationState,
               preview: c.preview,
               boundSession: c.binding ? c.binding.localSessionId : null,
               // Deliveries still owed a ruling, so the panel can offer the
@@ -4725,18 +4842,28 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
       /**
        * Withdraw a pair's standing permission to message this node.
        *
-       * Their next first contact stops at the gate again. Existing threads are
-       * left alone on purpose: revoking a permission is a decision about what
-       * happens next, and silently closing conversations would make it a
-       * decision about the past as well.
+       * History and its DSH Session remain.  Communication does not: the
+       * existing thread is paused until a new inbound message is explicitly
+       * accepted again. This is a reversible local boundary, not a block and
+       * not a Community mutation.
        */
       async revokePair(localAgentDid, peerAgentDid) {
         await conversationsReady
-        if (!localAgentDid || !peerAgentDid) return { ok: false, error: 'both DIDs are required' }
+        if (!looksLikeDid(localAgentDid) || !looksLikeDid(peerAgentDid)) {
+          return { ok: false, error: 'both DIDs must be did:key values' }
+        }
         const revoked = revokePair(state.permissions, localAgentDid, peerAgentDid, iso())
         if (!revoked) return { ok: false, error: 'no standing permission for that pair' }
         await persistPermissions()
-        return { ok: true, peerLabel: revoked.peerLabel }
+        const paused = Object.values(state.conversations)
+          .filter((conversation) => belongsToPair(conversation, localAgentDid, peerAgentDid))
+        for (const conversation of paused) conversation.communicationState = 'reauthorization_required'
+        if (paused.length > 0) await persistConversations()
+        const ids = new Set(paused.map((conversation) => conversation.conversationId))
+        for (const active of state.outgoing.values()) {
+          if (ids.has(active.conversationId)) active.controller?.abort?.(new Error('communication permission revoked'))
+        }
+        return { ok: true, peerLabel: revoked.peerLabel, pausedConversations: paused.length }
       },
 
       async decideDelivery(conversationId, deliveryId, decision, reason) {
@@ -4756,20 +4883,23 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         if (!ruled) return { ok: false, error: 'no delivery awaiting a decision' }
         await persistConversations()
 
-        const decidedBy = conversation.localAgentId ?? selfAgentId()
+        // The person at this node approved; this node's Agent is what the
+        // network records as acting. Principle 0: the actor is the Agent, and
+        // `decidedBy` is where the ruling came from.
+        const ruledByAgentId = conversation.localAgentId ?? selfAgentId()
         observeEdge(`delivery.${ruled.state}`, (observer) =>
           decision === 'accept'
             ? observer.deliveryAccepted({
                 taskId: ruled.taskId,
                 deliveryId,
-                decidedBy,
-                decidedByKind: 'human',
+                acceptedByAgentId: ruledByAgentId,
+                decidedBy: 'human',
               })
             : observer.deliveryRejected({
                 taskId: ruled.taskId,
                 deliveryId,
-                decidedBy,
-                decidedByKind: 'human',
+                rejectedByAgentId: ruledByAgentId,
+                decidedBy: 'human',
                 reason,
               }),
         )
