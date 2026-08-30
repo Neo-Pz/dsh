@@ -1979,7 +1979,7 @@ ${text}`)
           observeEdge('conversation.rejected', (observer) =>
             observer.conversationRejected({
               conversationId,
-              rejectedBy: selfAgentId(),
+              rejectedByAgentId: selfAgentId(),
               decidedBy: 'policy',
             }),
           )
@@ -2015,7 +2015,7 @@ ${text}`)
 
       if (conversation.state === 'pending') {
         observeEdge('conversation.accepted', (observer) =>
-          observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy: 'policy' }),
+          observer.conversationAccepted({ conversationId, acceptedByAgentId: selfAgentId(), decidedBy: 'policy' }),
         )
       }
       if (firstSighting) {
@@ -2095,7 +2095,7 @@ ${text}`)
       }
 
       observeEdge('conversation.accepted', (observer) =>
-        observer.conversationAccepted({ conversationId, acceptedBy: selfAgentId(), decidedBy }),
+        observer.conversationAccepted({ conversationId, acceptedByAgentId: selfAgentId(), decidedBy }),
       )
       observeEdge('relation.recorded', (observer) =>
         observer.relationRecorded({
@@ -2140,7 +2140,7 @@ ${text}`)
       observeEdge('conversation.rejected', (observer) =>
         observer.conversationRejected({
           conversationId,
-          rejectedBy: selfAgentId(),
+          rejectedByAgentId: selfAgentId(),
           decidedBy: 'human',
           reason,
         }),
@@ -3055,7 +3055,7 @@ ${text}`)
             observeEdge('conversation.accepted', (observer) =>
               observer.conversationAccepted({
                 conversationId,
-                acceptedBy: selfAgentId(),
+                acceptedByAgentId: selfAgentId(),
                 decidedBy: 'policy',
               }),
             )
@@ -4756,20 +4756,23 @@ But this binary cannot ${value.missing.join(' or ')}. ` +
         if (!ruled) return { ok: false, error: 'no delivery awaiting a decision' }
         await persistConversations()
 
-        const decidedBy = conversation.localAgentId ?? selfAgentId()
+        // The person at this node approved; this node's Agent is what the
+        // network records as acting. Principle 0: the actor is the Agent, and
+        // `decidedBy` is where the ruling came from.
+        const ruledByAgentId = conversation.localAgentId ?? selfAgentId()
         observeEdge(`delivery.${ruled.state}`, (observer) =>
           decision === 'accept'
             ? observer.deliveryAccepted({
                 taskId: ruled.taskId,
                 deliveryId,
-                decidedBy,
-                decidedByKind: 'human',
+                acceptedByAgentId: ruledByAgentId,
+                decidedBy: 'human',
               })
             : observer.deliveryRejected({
                 taskId: ruled.taskId,
                 deliveryId,
-                decidedBy,
-                decidedByKind: 'human',
+                rejectedByAgentId: ruledByAgentId,
+                decidedBy: 'human',
                 reason,
               }),
         )
