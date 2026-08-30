@@ -320,8 +320,8 @@ function AllowedPairs({ pairs, onChanged }) {
                 </div>
               ) : null}
             </div>
-            {/* Withdrawing decides what happens next, not what already
-                happened: open threads are left alone. */}
+            {/* Withdrawing keeps the history but pauses the live thread. The
+                next inbound message returns to Requests for a new decision. */}
             <button className="ifp-btn" disabled={busy} onClick={() => revoke(pair)}>
               撤销
             </button>

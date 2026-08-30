@@ -106,13 +106,14 @@ function DeliveryRuling({ conversationId, delivery, busy, onDecide }) {
 
 function Row({ conversation, busy, onAccept, onReject, onDecideDelivery }) {
   const waiting = conversation.state === 'pending'
+  const reauthorization = waiting && conversation.communicationState === 'reauthorization_required'
   const deliveries = conversation.deliveries ?? []
   return (
     <li className={`ifp-req${waiting ? ' waiting' : ''}`}>
       <div className="ifp-req-main">
         <div className="ifp-req-head">
           <span className={`ifp-tag ${STATE_TONE[conversation.state] ?? 'hidden'}`}>
-            {STATE_LABEL[conversation.state] ?? conversation.state}
+            {reauthorization ? '等待重新授权' : (STATE_LABEL[conversation.state] ?? conversation.state)}
           </span>
           <b>{conversation.peer ?? '未署名的 Agent'}</b>
           <span className="ifp-muted">
@@ -120,6 +121,11 @@ function Row({ conversation, busy, onAccept, onReject, onDecideDelivery }) {
           </span>
         </div>
         {conversation.preview ? <p className="ifp-req-preview">“{conversation.preview}”</p> : null}
+        {reauthorization ? (
+          <p className="ifp-warn">
+            通信许可已撤销，原来的本地 Session 与聊天历史仍保留；接受后才恢复这一对 Agent 的通信。
+          </p>
+        ) : null}
         <div className="ifp-muted ifp-mono ifp-wrap">
           {conversation.conversationId}
           {conversation.peerDid ? ` · ${conversation.peerDid}` : ''}
@@ -246,7 +252,7 @@ export function RequestsTab({ onChanged }) {
       >
         <p>
           {pending.length > 0
-            ? '接受之后才会创建本地 Session、才会有模型开始处理。同意一次之后，这对 Agent 之后的消息就直接进来，不再回到这里。'
+            ? '接受之后才会创建或恢复本地 Session、才会有模型开始处理。首次同意后，这对 Agent 的消息直接进来；若你后来撤销通信许可，下一条会回到这里等待重新授权。'
             : '对方把活交回来了，等你决定收不收。这跟允许对方说话是两件事。'}
         </p>
         <ul className="ifp-list ifp-reqs">

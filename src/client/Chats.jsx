@@ -87,6 +87,11 @@ function Thread({ conversation, onBack }) {
         左边是对方，右边是这台机器上的 Agent。👤 表示这句话是人写的，🤖 表示 Agent 自己说的——
         人写的消息仍然由 Agent 签名发出，两件事都记着。
       </p>
+      {conversation.communicationState === 'reauthorization_required' ? (
+        <p className="ifp-warn">
+          通信许可已撤销：这条对话已暂停，不能发送。对方下一条消息会在「待处理」中等待你重新授权；历史不会丢失。
+        </p>
+      ) : null}
       {!snapshot && !error ? <p className="ifp-muted">正在读取…</p> : null}
       {snapshot && messages.length === 0 ? (
         <p className="ifp-muted">这条对话还没有消息。</p>
@@ -169,6 +174,7 @@ export function ChatsTab() {
             <li key={conversation.conversationId}>
               <button className="ifp-chat-row" onClick={() => setOpenId(conversation.conversationId)}>
                 <b>{conversation.peer || conversation.peerAgentId}</b>
+                {conversation.communicationState === 'reauthorization_required' ? <span className="ifp-tag up">已暂停</span> : null}
                 {conversation.preview ? (
                   <span className="ifp-muted ifp-truncate">{conversation.preview}</span>
                 ) : null}
