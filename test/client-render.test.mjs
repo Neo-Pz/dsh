@@ -547,6 +547,8 @@ describe('the Hub', () => {
     await settle()
     assert.match(container.textContent, /通信许可已撤销/)
     assert.match(container.textContent, /不能发送/)
+    assert.equal(container.querySelector('textarea[aria-label="聊天消息"]').disabled, true)
+    assert.equal(container.querySelector('button[type="submit"]').disabled, true)
 
     responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
   })
@@ -557,6 +559,48 @@ describe('the Hub', () => {
     assert.match(container.textContent, /if-lt-b/)
     assert.match(container.textContent, /192\.168\.1\.20/)
     assert.match(container.textContent, /Writer/)
+  })
+
+  it('Chat composer sends as the bound Agent and retries with the same message ID', async () => {
+    responses['/iflow/panel/conversations'] = { ok: true, conversations: [{
+      ...PENDING_CONVERSATION, conversationId: 'compose-test', state: 'accepted',
+      localAgentId: 'rrt', peerAgentId: 'weww', peer: 'wwee',
+    }] }
+    await mount(slots.get('settings.section'))
+    await clickTab('对话')
+    const row = container.querySelector('.ifp-chat-row')
+    await React.act(async () => row.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    await settle()
+    assert.match(container.textContent, /From: rrt/)
+    const text = container.querySelector('textarea')
+    const form = container.querySelector('form')
+    assert.equal(container.querySelector('button[type="submit"]').disabled, true)
+    await React.act(async () => require_('react-dom/test-utils').Simulate.change(text, { target: { value: 'hello from panel' } }))
+    const originalFetch = globalThis.fetch
+    const sent = []
+    globalThis.fetch = async (path, options) => {
+      if (path !== '/iflow/panel/conversations/send') return originalFetch(path, options)
+      sent.push(options)
+      return { ok: true, json: async () => sent.length === 1 ? { ok: false, error: 'test delivery unavailable' } : { ok: true, views: [] } }
+    }
+    try {
+      for (let i = 0; i < 2; i++) {
+        await React.act(async () => form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })))
+        await settle()
+      }
+      assert.equal(sent.length, 2)
+      assert.equal(sent[0].headers['X-IFlow-Panel'], 'chat')
+      const first = JSON.parse(sent[0].body)
+      assert.equal(first.conversationId, 'compose-test')
+      assert.equal(first.text, 'hello from panel')
+      assert.equal(first.mode, 'direct')
+      assert.equal(first.fromAgentId, undefined, 'the server chooses the bound identity, not a browser override')
+      assert.equal(JSON.parse(sent[1].body).messageId, first.messageId)
+      assert.equal(text.value, '')
+    } finally {
+      globalThis.fetch = originalFetch
+      responses['/iflow/panel/conversations'] = { ok: true, conversations: [PENDING_CONVERSATION] }
+    }
   })
 
   it('draws one node per Agent and one line per relationship', async () => {

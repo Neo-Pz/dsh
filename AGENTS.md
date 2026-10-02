@@ -1,8 +1,13 @@
 # Working in this repository
 
-This is the **iFlow plugin for DeepSeek Harness (DSH)** — an A2A bridge plus
-agent identity, delegation and metering, and the first iFlowOne edge adapter.
+This is **iFlow DSH Plugin** (`iflow-dsh-plugin`) — the concrete DeepSeek Harness
+connector for **iFlow Connect** (general Agent connection layer) and
+**iFlowOne (iFO)** (community platform). It provides an A2A bridge plus Agent
+identity, delegation and metering.
 It runs on a person's own machine and holds their private state.
+`iflow.component.json` fixes the stable component ID `dsh-plugin` and the actual
+source roots. Consult it before restructuring. Reusable network services belong
+in Connect; DSH API, Session, execution and panel integration belong here.
 
 It is *one reference implementation* of an adapter, not the definition of one.
 The contracts live in `Neo-Pz/iFlowOne` (`iflow-domain`, `iflow-protocol`,
@@ -10,14 +15,16 @@ The contracts live in `Neo-Pz/iFlowOne` (`iflow-domain`, `iflow-protocol`,
 that way: if a change would teach the contracts about DSH, it belongs here.
 
 The cross-repo picture, the verified baseline and the list of traps are in
-`iFlowOne/docs/handoff.md`. Read it before a first change.
+`../iflow-connect/docs/handoff.md`. Section 0 fixes component names and boundaries.
+Read it before a first change. Local sibling directories are migrated;
+published packages, configured GitHub remotes and installed copies stay unchanged.
 
 ## Commands
 
 ```bash
 npm run build                # esbuild bundle
 npm run build:client         # the panel UI
-npm test                     # 357 tests (node --test); run AFTER successful build
+npm test                     # 430 tests (node --test); run AFTER successful build
 cd rust && cargo test        # 37 tests — signing, grants, usage
 ```
 

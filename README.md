@@ -1,12 +1,22 @@
-# iFlow
+# iFlow DSH Plugin
 
 **Agent2Agent (A2A) bridge + agent identity / delegation / metering for DeepSeek Harness (DSH).**
 
-iFlow is both a **DSH plugin** and a small **protocol**. It gives agents on different DSH machines a
+The concrete DeepSeek Harness connector for **iFlow Connect**, the general Agent
+connection layer, and **iFlowOne (iFO)**, the Agent and Human community platform.
+Its canonical identifier remains `iflow-dsh-plugin`. See
+[the naming and boundary decision](../iflow-connect/docs/handoff.md#0-naming-and-component-boundaries--fixed-2026-10-02).
+The sibling repositories now use their canonical local directory names.
+This plugin directory, published package name and installed copy are unchanged.
+`iflow.component.json` identifies this repository as `dsh-plugin`; shared
+Connect services belong in the sibling Connect repository, while DSH host
+integration remains here.
+
+This plugin gives agents on different DSH machines a
 signed, task-oriented A2A channel: each side identifies itself with a `did:key` trust root, can
 delegate work under scoped grants (L0–L3), and meters the tokens it sends and receives.
 
-It is also the first **iFlowOne edge adapter**: it journals what this runtime actually did as signed,
+It is also the first concrete **iFlow Connect platform connector**: it journals what this runtime actually did as signed,
 replayable domain events, and serves the projections the iFlowOne Hub reads. The domain, protocol and
 edge logic are open source at [`Neo-Pz/iFlowOne`](https://github.com/Neo-Pz/iFlowOne) under
 Apache-2.0 and published on npm; they know nothing about DSH. This repository is the runtime
@@ -19,6 +29,34 @@ another.
 ---
 
 ## What it does
+
+- **ARD discovery (local implementation, not yet installed)** — `iflow_discovery`
+  searches the configured Community as an explicit `fromAgentId`, or publishes
+  and withdraws that Agent's public profile. Search never executes a candidate
+  or changes pair permissions. The Web's `discovery.search` Intent uses the same
+  adapter after the selected Agent decrypts it; its results are sealed for that
+  browser. Search queries are deliberately disclosed to the registry and are
+  never copied into the public Journal.
+
+  To publish, supply `action: publish`, `fromAgentId`, a public `description`,
+  2–5 `representativeQueries`, optional `tags`, and `confirmPublic: true`.
+  Community publication must already be enabled, and `iflow_set_public_url`
+  must name a public HTTPS endpoint without credentials or query parameters.
+  The card identifies the selected Agent, distinct from the Node card; it is
+  carried in a public registration signed by that Agent. No profile is published
+  automatically. `action: withdraw` with the same identity and confirmation
+  appends a signed tombstone; history remains auditable.
+
+  Search uses `action: search`, `fromAgentId`, `query`, optional `capabilities`,
+  `pageSize` and `pageToken`. It works independently of the relay enable flag.
+  Publishing or searching does not grant direct access to tools; receiving
+  requests still passes the existing A2A identity and permission checks.
+  `src/generated/ard.ts` is generated from Core, pending an authorized Core
+  release; `node ../iflow-connect/scripts/sync-connect-snapshots.mjs --check` checks drift.
+  Local acceptance on 2026-10-02: the rebuilt bundle passed all 412 tests,
+  including Agent-signed discovery with relay disabled; the existing send and
+  conversation guard mutations were also caught. The installed DSH copy has
+  not been replaced.
 
 - **Bidirectional A2A** — two DSH machines (or any A2A agent) can delegate tasks to each other via
   JSON-RPC `SendMessage` / `GetTask` / `CancelTask` / `ListTasks`, and get the final answer back.
@@ -35,7 +73,10 @@ another.
   it just binds a new one. Neither side ever learns the other's session id, and iFlow stores no
   transcript: `conversation.*` facts carry a content digest, never the text.
 - **First contact waits for a person** — a message from an unknown agent is held as a pending request:
-  no session, no model, no tools, no tokens. `iflow_conversations` lists what is waiting and accepts
+  no session, no model, no tools, no tokens. Conversation list rows expose `communicationState`
+  (`active` or `reauthorization_required`) separately from the conversation's `state`.
+  Missing optional list fields are omitted so the raw result is lossless JSON.
+  `iflow_conversations` lists what is waiting and accepts
   or rejects it; `trust` promotes a peer to auto-accept. This is a *separate* layer from the
   restricted `remote-a2a` preset — that governs what an accepted task may do, this governs whether a
   stranger gets to make this machine do anything at all.
@@ -159,8 +200,29 @@ dsh plugin --profile web add dsh-plugin-terminal
    ```sh
    dsh plugin ...   # (via the plugin's iflow_* tools, or the AgentCard endpoint)
    ```
-3. Use the `iflow_send` tool (host-side) to delegate a task to the peer; the peer runs it as a local
-   agent and returns the final answer.
+3. Use the **DSH tool** `iflow_send` (not a PowerShell command), with separate Node and Agent identities:
+   ```json
+   {
+     "peer": "if-dsk",
+     "fromAgentId": "rrt",
+     "toAgentId": "weww",
+     "toAgentDid": "<independently confirmed Agent did:key>",
+     "prompt": "Hello, please confirm receipt."
+   }
+   ```
+   `peer` selects a registered, DID-pinned Node route. `toAgentId` and `toAgentDid` select the
+   receiving Agent, not that Node or its alias. Confirm the Agent id/DID with its owner or a
+   trusted directory first: verifying a Node card alone does **not** prove its Agent roster.
+   Multiple local Agents require `fromAgentId`. The selected Agent signs the request; signing
+   failure never falls back to an unsigned or Node-signed message.
+
+   Both Nodes should install this fix: a receiver rejects an explicit target id/DID it does
+   not host. Conversation reuse requires the same local and remote Agent ids **and** DIDs;
+   an explicitly selected mismatching or legacy unbound thread is refused, not reassigned.
+   Revoked communication remains paused. Legacy queued messages without exact participant
+   identities remain untouched; they are not automatically resent as the currently selected Agent.
+   A failed Node-card verification stops before sending (including relay fallback); this tool
+   does not infer that an unreachable route is a verified route.
 
 > **Inbound tasks are confined, and fail closed.** A remote peer's task runs under the restricted
 > `remote-a2a` agent preset. If that preset is not installed, the task is **rejected** rather than

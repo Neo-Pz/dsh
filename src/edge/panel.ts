@@ -171,13 +171,12 @@ export function installPanelRoutes(ctx, webServer, deps) {
       send(response, 200, await deps.listConversations())
     }, { write: true })],
 
-    // Reading a thread is not changing anything, so it is a read route — and
-    // like every read here it still answers this machine only unless a token
-    // says otherwise.
+    // A read still reveals private plaintext; use the local control-plane
+    // access check even though it does not mutate a conversation.
     ['/iflow/panel/conversations/messages', 'POST', guard(async (request, response) => {
       const body = await readJson(request)
       send(response, 200, await deps.conversationMessages(body.conversationId, body.cursor, body.limit))
-    }, { write: false })],
+    }, { write: true })],
 
     ['/iflow/panel/conversations/accept', 'POST', guard(async (request, response) => {
       const body = await readJson(request)
@@ -187,6 +186,14 @@ export function installPanelRoutes(ctx, webServer, deps) {
     ['/iflow/panel/conversations/reject', 'POST', guard(async (request, response) => {
       const body = await readJson(request)
       send(response, 200, await deps.rejectConversation(body.conversationId, body.reason))
+    }, { write: true })],
+
+    ['/iflow/panel/conversations/send', 'POST', guard(async (request, response) => {
+      // A custom header requires a CORS preflight for cross-site callers.
+      // This panel never grants cross-origin permission, including to localhost.
+      if (request.headers?.['x-iflow-panel'] !== 'chat') return send(response, 403, { error: 'same-origin panel request required' })
+      const body = await readJson(request)
+      send(response, 200, await deps.sendConversation(body))
     }, { write: true })],
 
     ['/iflow/panel/permissions/revoke', 'POST', guard(async (request, response) => {

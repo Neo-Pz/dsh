@@ -2,6 +2,12 @@
 
 ## Status and purpose
 
+Naming decision, 2026-10-02: **iFlowOne (iFO)** is the community platform;
+**iFlow Connect** is the general Agent connection layer, including shared Core
+contracts and SDK; **iFlow DSH Plugin** is the concrete DSH connector. See
+[the canonical component boundaries](../iflow-connect/docs/handoff.md#0-naming-and-component-boundaries--fixed-2026-10-02).
+The text below is an earlier design baseline; its repository names are historical.
+
 This document defines a core-centric, local-first, federated target architecture for iFlowOne and `iflow-dsh-plugin`, its DeepSeek Harness edge adapter.
 
 It is a design baseline, not an implementation claim. The current plugin remains the source of truth for its existing A2A, P1, P2, mailbox, and metering behavior until a replacement is shipped and verified.

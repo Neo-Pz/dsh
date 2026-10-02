@@ -49,7 +49,6 @@ function createHost(workspace, { resumeFails = false } = {}) {
   const resumed = []
   const followups = []
   const sessionEvents = new Map()
-  const disposers = []
   let counter = 0
 
   const makeHandle = (sessionId) => {
@@ -140,8 +139,7 @@ function createHost(workspace, { resumeFails = false } = {}) {
       return () => clearTimeout(id)
     },
     effect(fn) {
-      const dispose = fn()
-      if (typeof dispose === 'function') disposers.push(dispose)
+      fn()
     },
     get() {
       return undefined
@@ -181,9 +179,7 @@ function createHost(workspace, { resumeFails = false } = {}) {
       handler(req, res).catch(reject)
     })
 
-  return { ctx, routes, tools, created, resumed, followups, post, dispose() {
-    for (const dispose of disposers.reverse()) dispose()
-  } }
+  return { ctx, routes, tools, created, resumed, followups, post }
 }
 
 /** Send one A2A message and return the resulting Task. */
@@ -231,7 +227,7 @@ async function boot({ trust, resumeFails = false } = {}) {
   // wait for it — journaling must never gate answering a peer. Tests that
   // assert on journaled facts do have to wait for it.
   await waitFor(() => host.routes.has('/iflow/edge/status'), 'the edge to mount')
-  return { workspace, host, cleanup() { host.dispose(); rmSync(workspace, { recursive: true, force: true }) } }
+  return { workspace, host, cleanup: () => rmSync(workspace, { recursive: true, force: true }) }
 }
 
 function readConversations(workspace) {
@@ -239,20 +235,6 @@ function readConversations(workspace) {
   if (!existsSync(path)) return { conversations: {} }
   return JSON.parse(readFileSync(path, 'utf8'))
 }
-
-describe('ARD tool in the shipped bundle', () => {
-  it('registers discovery and refuses an undeclared search Agent with a renderable reason', async () => {
-    const { host, cleanup } = await boot()
-    try {
-      const tool = host.tools.get('iflow_discovery')
-      assert.ok(tool)
-      const result = await tool.execute({ action: 'search', fromAgentId: 'not-declared', query: 'TypeScript' })
-      assert.equal(result.ok, false)
-      assert.match(result.error, /declared local Agent/)
-      assert.doesNotMatch(JSON.stringify(tool.output.render({}, result)), /undefined/)
-    } finally { cleanup() }
-  })
-})
 
 describe('explicit Agent outbound routing', () => {
   const localDid = 'did:key:z6MktzEtcs54J3MRqg36xT4uZdPotR5PwmHwnfwc8sSR2HAM'
@@ -266,7 +248,6 @@ describe('explicit Agent outbound routing', () => {
     const save = (name, value) => writeFileSync(join(data, name + '.json'), JSON.stringify(value))
     save('agents', { agents: [{ agentId: 'rrt', did: localDid, label: 'RRT' }, { agentId: 'other', did: nodeDid, label: 'Other' }] })
     save('peers', { peers: [{ name: 'route-only', url: 'http://test-node:3080', did: nodeDid, token: 'test-token' }] })
-    if (options.discovery || options.webIntent) save('community', { url: 'https://test-registry.example', token: 'fixture-token', visibility: 'structural' })
     if (options.conversations) save('conversations', { conversations: options.conversations })
     if (options.mailbox) save('mailbox', { inbox: [], outbox: options.mailbox })
     if (options.revoked || options.revokeDuring) save('permissions', { pairs: { pair: {
@@ -274,10 +255,8 @@ describe('explicit Agent outbound routing', () => {
       messaging: options.revoked ? 'blocked' : 'allowed', revokedAt: options.revoked ? '2026-01-01T00:00:00Z' : null,
     } } })
     const host = createHost(workspace)
-    if (options.pollTerminal) host.ctx.timeout = async () => {}
     const posts = [], signs = []
     let failSign = options.failSign
-    let intentCollected = false
     host.ctx.subprocess.spawn = ({ argv }) => {
       let value = '{}', exitCode = 0
       if (argv[0] === 'curl') {
@@ -285,19 +264,7 @@ describe('explicit Agent outbound routing', () => {
         if (bodyIndex >= 0) {
           const body = JSON.parse(argv[bodyIndex + 1])
           posts.push({ argv, body })
-          value = argv.at(-1).endsWith('/v1/ard/search')
-            ? JSON.stringify({ results: [{ identifier: 'urn:air:example.com:agents:reviewer', displayName: 'Reviewer', score: 1 }] })
-            : JSON.stringify({ result: { task: { id: 'task-test', status: { state: options.pollTerminal && body.method === 'SendMessage' ? 'TASK_STATE_SUBMITTED' : options.terminalState || 'TASK_STATE_COMPLETED', ...(options.replyText !== undefined ? { message: { parts: [{ text: options.replyText }] } } : {}) }, ...(options.replyText === undefined ? { artifacts: [{ parts: [{ text: 'test reply' }] }] } : {}) } } })
-        } else if (argv.at(-1).includes('/v1/edge/intents?')) {
-          value = JSON.stringify({ intents: !options.webIntent || intentCollected ? [] : [{
-            version: 1, kind: 'human.intent', routing: {
-              intentId: 'intent-sync-test', principalId: 'iflow:principal:owner',
-              toAgentId: 'rrt', toAgentAuthorityDid: localDid,
-              browserSessionId: 'browser-test', viewPublicKey: localDid,
-              issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
-            }, sealed: 'opaque-fixture-intent',
-          }] })
-          intentCollected = true
+          value = JSON.stringify({ result: { task: { id: 'task-test', status: { state: 'TASK_STATE_REJECTED', message: { parts: [{ text: 'This node is not accepting conversations from that agent.' }] } } } } })
         } else value = JSON.stringify({ jws: { signer: options.wrongPin ? localDid : nodeDid } })
       } else if (argv.includes('--help') || argv.includes('help')) {
         value = '  --node-home <dir>\n  seal <file>\n  open <file>'
@@ -309,15 +276,6 @@ describe('explicit Agent outbound routing', () => {
         if (failSign) exitCode = 1
         value = JSON.stringify({ signer: options.wrongSigner ? nodeDid : localDid })
       } else if (argv.includes('sign-blob')) value = JSON.stringify({ signerDid: nodeDid, signature: 'AA' })
-      else if (options.webIntent && argv.includes('open')) {
-        const index = argv.indexOf('open')
-        writeFileSync(argv[index + 2], JSON.stringify(options.webIntent))
-      } else if (options.webIntent && argv.includes('seal')) {
-        const index = argv.indexOf('seal')
-        // Crypto itself has separate real-key tests. This host stub lets the
-        // mounted bundle's private routing/policy be inspected after sealing.
-        writeFileSync(argv[index + 3], readFileSync(argv[index + 2]))
-      }
       else if (argv.includes('show')) value = JSON.stringify({ did: nodeDid })
       const revokeNow = (options.revokeDuring === 'signing' && argv.includes('sign-file')) ||
         (options.revokeDuring === 'card' && argv.includes('agentcard-verify'))
@@ -329,129 +287,14 @@ describe('explicit Agent outbound routing', () => {
       } }
     }
     const plugin = (await import(BUNDLE)).default
-    plugin.apply(host.ctx, { conversationWorkspace: workspace, ...((options.discovery || options.webIntent) ? { relay: false } : {}), ...(options.webIntent ? { webIntentIntervalMs: 5 } : {}) })
+    plugin.apply(host.ctx, { conversationWorkspace: workspace })
     await waitFor(() => host.routes.has('/iflow/edge/status'), 'outbound host readiness')
     const tool = host.tools.get('iflow_send')
     return { tool, workspace, host, posts, signs, save, setFailSign: (v) => { failSign = v },
       send: (overrides = {}) => tool.execute(JSON.parse(JSON.stringify({ ...args, ...overrides }))),
-      cleanup() { host.dispose(); rmSync(workspace, { recursive: true, force: true }) },
+      cleanup: () => rmSync(workspace, { recursive: true, force: true }),
     }
   }
-
-  const syncConversations = () => Object.fromEntries([
-    ['sync-a', remoteDid, localDid], ['sync-b', nodeDid, localDid], ['sync-foreign', remoteDid, nodeDid],
-  ].map(([id, peerDid, ownDid]) => [id, {
-    conversationId: id, localAgentId: 'rrt', localAgentAuthorityDid: ownDid,
-    peerAgentId: 'coder', peerAgentAuthorityDid: peerDid, peer: id,
-    active: true, state: 'active', mode: 'direct',
-    updatedAt: '2026-10-01T00:00:00Z', binding: { runtime: 'dsh', localSessionId: `session-${id}` },
-  }]))
-
-  it('syncs one exact peer DID through the encrypted Web queue with relay disabled', async () => {
-    const f = await fixture({ conversations: syncConversations(), webIntent: {
-      version: 1, kind: 'conversation.sync', ownAgentId: 'rrt', peerAgentId: 'coder', peerAgentAuthorityDid: remoteDid,
-    } })
-    try {
-      const post = await waitFor(() => f.posts.find((item) => item.body.kind === 'browser.view'), 'sealed sync result')
-      const view = JSON.parse(Buffer.from(post.body.sealed, 'base64url').toString('utf8'))
-      assert.equal(view.kind, 'conversation.snapshot')
-      assert.equal(view.conversationId, 'sync-a')
-      assert.equal(post.body.routing.ownAgentId, 'rrt')
-      assert.deepEqual(f.host.resumed.map((item) => item.resumeSessionId), ['session-sync-a'])
-      assert.equal(f.host.followups.length, 0)
-    } finally { f.cleanup() }
-  })
-
-  for (const [name, target] of [
-    ['unqualified same-named peers', { peerAgentId: 'coder' }],
-    ['a changed peer DID on a named Conversation', { conversationId: 'sync-a', peerAgentAuthorityDid: nodeDid }],
-    ['a Conversation owned by another local DID', { conversationId: 'sync-foreign' }],
-  ]) it(`refuses Web sync for ${name} before opening a Session`, async () => {
-    const f = await fixture({ conversations: syncConversations(), webIntent: {
-      version: 1, kind: 'conversation.sync', ownAgentId: 'rrt', ...target,
-    } })
-    try {
-      const post = await waitFor(() => f.posts.find((item) => item.body.kind === 'browser.view'), 'sealed sync refusal')
-      const view = JSON.parse(Buffer.from(post.body.sealed, 'base64url').toString('utf8'))
-      assert.equal(view.kind, 'conversation.status')
-      assert.equal(view.code, 'conversation_unavailable')
-      assert.deepEqual(f.host.resumed, [])
-      assert.deepEqual(f.host.created, [])
-    } finally { f.cleanup() }
-  })
-
-  it('lists both same-named peer identities and excludes another local DID history', async () => {
-    const f = await fixture({ conversations: syncConversations(), webIntent: {
-      version: 1, kind: 'conversation.sync', ownAgentId: 'rrt',
-    } })
-    try {
-      const post = await waitFor(() => f.posts.find((item) => item.body.kind === 'browser.view'), 'sealed list result')
-      const view = JSON.parse(Buffer.from(post.body.sealed, 'base64url').toString('utf8'))
-      assert.equal(view.kind, 'conversation.list')
-      assert.deepEqual(new Set(view.conversations.map((item) => item.peerAgentAuthorityDid)), new Set([remoteDid, nodeDid]))
-      assert.equal(view.conversations.length, 2)
-      assert.ok(view.conversations.every((item) => item.conversationId !== 'sync-foreign'))
-    } finally { f.cleanup() }
-  })
-
-  it('searches the ARD registry with the selected Agent signature even when relay is disabled', async () => {
-    const f = await fixture({ discovery: true })
-    try {
-      const tool = f.host.tools.get('iflow_discovery')
-      const result = await tool.execute({ action: 'search', fromAgentId: 'rrt', query: 'TypeScript' })
-      assert.equal(result.ok, true, JSON.stringify(result))
-      assert.equal(result.response.results[0].displayName, 'Reviewer')
-      const requests = f.posts.filter((post) => post.body.query)
-      assert.equal(requests.length, 1)
-      const header = requests[0].argv.find((arg) => arg.startsWith('X-IFlow-Signature:'))
-      assert.equal(JSON.parse(header.slice('X-IFlow-Signature: '.length)).signer, localDid)
-      assert.ok(f.signs.every((home) => home.endsWith(join('agents', 'rrt'))))
-      assert.equal(f.host.created.length, 0)
-      f.setFailSign(true)
-      const refused = await tool.execute({ action: 'search', fromAgentId: 'rrt', query: 'TypeScript' })
-      assert.equal(refused.ok, false)
-      assert.match(refused.error, /agent_signing_failed/)
-      assert.equal(f.posts.filter((post) => post.body.query).length, 1, 'Signing failure must not send an unsigned search')
-    } finally { f.cleanup() }
-  })
-
-  for (const pollTerminal of [false, true]) for (const terminalState of ['TASK_STATE_REJECTED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED', 'TASK_STATE_COMPLETED']) for (const replyText of ['', 'remote reason or output']) {
-    it(`terminal output contract ${pollTerminal ? 'polled' : 'immediate'} ${terminalState} ${replyText ? 'text' : 'empty'}`, async () => {
-      const f = await fixture({ pollTerminal, terminalState, replyText })
-      try {
-        const value = await f.send()
-        const success = terminalState === 'TASK_STATE_COMPLETED' && !!replyText
-        assert.equal(value.ok, success)
-        assert.equal(value.state, terminalState)
-        assert.equal(value.text, replyText)
-        if (success) assert.equal(Object.hasOwn(value, 'error'), false)
-        else {
-          assert.match(value.error, new RegExp(terminalState))
-          assert.ok(value.error.includes(replyText || 'with no output'))
-          assert.ok(f.tool.output.render(args, value)[0].text.includes(value.error))
-        }
-      } finally { f.cleanup() }
-    })
-  }
-  it('terminal output contract rendering fallback and submitted status', async () => {
-    const f = await fixture({ terminalState: 'TASK_STATE_SUBMITTED' })
-    try {
-      const value = await f.send({ waitForCompletion: false })
-      assert.equal(value.ok, true)
-      const rendered = f.tool.output.render(args, value)[0].text
-      assert.match(rendered, /submitted/)
-      assert.doesNotMatch(rendered, /finished|undefined/)
-      for (const legacy of [{ ok: false, state: 'TASK_STATE_REJECTED', text: 'peer refused' }, { ok: false, text: 'reason' }, { ok: false }]) {
-        const text = f.tool.output.render(args, legacy)[0].text
-        assert.doesNotMatch(text, /undefined/)
-        assert.ok(text.includes(legacy.text || 'no error details'))
-      }
-    } finally { f.cleanup() }
-  })
-  it('terminal output contract wait false preserves terminal failure', async () => {
-    const f = await fixture({ terminalState: 'TASK_STATE_REJECTED', replyText: 'peer refused' })
-    try { assert.equal((await f.send({ waitForCompletion: false })).ok, false) } finally { f.cleanup() }
-  })
 
   it('sends and signs as rrt to weww, reusing only the exact Agent pair', async () => {
     const f = await fixture()
@@ -480,6 +323,17 @@ describe('explicit Agent outbound routing', () => {
       const mismatch = await f.send({ conversationId: first.conversationId, toAgentId: 'someone-else' })
       assert.match(mismatch.error, /conversation_mismatch/)
       assert.equal(f.posts.length, 2)
+    } finally { f.cleanup() }
+  })
+
+  it('DIAGNOSTIC rejected terminal response carrying a reason text', async () => {
+    const f = await fixture()
+    try {
+      const value = await f.send()
+      console.log('DIAG execute result: ' + JSON.stringify(value))
+      console.log('DIAG has error key: ' + Object.prototype.hasOwnProperty.call(value, 'error'))
+      const rendered = f.tool.output.render(args, value)
+      console.log('DIAG render output: ' + JSON.stringify(rendered))
     } finally { f.cleanup() }
   })
 

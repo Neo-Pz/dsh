@@ -15,7 +15,10 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test \"test/*.test.mjs\"",
-    "build:client": "node scripts/build-client.mjs"
+    "build:client": "node scripts/build-client.mjs",
+    "test:guards:send": "node scripts/check-send-guards.mjs",
+    "test:guards:conversation": "node scripts/check-conversation-service-guards.mjs",
+    "test:guards:terminal": "node scripts/check-terminal-output-guards.mjs"
   },
   "dsh": {
     "bundle": {

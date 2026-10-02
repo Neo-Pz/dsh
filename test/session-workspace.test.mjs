@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
-const source = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
+const source = readFileSync(join(import.meta.dirname, '..', 'src', 'runtime', 'dsh-agent-runtime.ts'), 'utf8')
 
 /**
  * The same source with comments removed.

@@ -92,7 +92,7 @@ describe('one row per counterparty', () => {
 describe('the plugin performs that selection', () => {
   it('groups by counterparty rather than listing every conversation', () => {
     // The line this replaces mapped every conversation straight into the page.
-    assert.match(source, /collapseToCounterparties\(state\.conversations, ownAgentId\)/)
+    assert.match(source, /collapseToCounterparties\(state\.conversations, ownAgentId, \{ localAgentAuthorityDid: ownAgentAuthorityDid \}\)/)
     // And the old line is gone: it mapped every conversation into the page.
     assert.equal(source.includes('.filter((candidate) => candidate.localAgentId === ownAgentId)'), false)
   })

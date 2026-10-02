@@ -4,6 +4,7 @@
  * Agent authority and private projections are sealed to a browser view key.
  */
 import { canonicalJson, validateEncryptedIntent } from 'iflow-protocol'
+import { parseArdSearchRequest } from '../generated/ard.ts'
 
 const STORE_VERSION = 2
 const MAX_TEXT = 16 * 1024
@@ -64,6 +65,12 @@ export function parseConversationIntent(text) {
     throw new IntentPolicyError('Intent version or kind is unsupported', 'unsupported_action')
   }
 
+  if (value.kind === 'discovery.search') {
+    only(value, new Set(['version', 'kind', 'request']))
+    try { return { version: 1, kind: value.kind, request: parseArdSearchRequest(value.request) } }
+    catch (error) { throw new IntentPolicyError(error.message, 'invalid_discovery_search') }
+  }
+
   if (value.kind === 'conversation.send') {
     only(value, new Set([
       'version', 'kind', 'mode', 'targetAgentId', 'targetAgentAuthorityDid', 'text', 'conversationId',
@@ -90,17 +97,22 @@ export function parseConversationIntent(text) {
   }
 
   if (value.kind === 'conversation.sync') {
-    only(value, new Set(['version', 'kind', 'ownAgentId', 'peerAgentId', 'conversationId', 'cursor', 'limit']))
+    only(value, new Set(['version', 'kind', 'ownAgentId', 'peerAgentId', 'peerAgentAuthorityDid', 'conversationId', 'cursor', 'limit']))
     if (value.limit !== undefined && (!Number.isInteger(value.limit) || value.limit < 1 || value.limit > MAX_SYNC_LIMIT)) {
       throw new IntentPolicyError(`limit must be an integer from 1-${MAX_SYNC_LIMIT}`, 'invalid_limit')
     }
     const conversationId = shortString(value.conversationId, 'conversationId', { optional: true })
     const peerAgentId = shortString(value.peerAgentId, 'peerAgentId', { optional: true })
+    const peerAgentAuthorityDid = shortString(value.peerAgentAuthorityDid, 'peerAgentAuthorityDid', { optional: true })
+    if (peerAgentAuthorityDid !== undefined && !peerAgentAuthorityDid.startsWith('did:key:')) {
+      throw new IntentPolicyError('peerAgentAuthorityDid must be did:key', 'invalid_target')
+    }
     return {
       version: 1,
       kind: value.kind,
       ownAgentId: shortString(value.ownAgentId, 'ownAgentId'),
       peerAgentId,
+      ...(peerAgentAuthorityDid !== undefined ? { peerAgentAuthorityDid } : {}),
       conversationId,
       cursor: shortString(value.cursor, 'cursor', { optional: true }),
       limit: value.limit ?? DEFAULT_SYNC_LIMIT,

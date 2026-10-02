@@ -205,6 +205,7 @@ describe('the panel answers this machine only', () => {
     // publishing — and the relationship graph is nobody else's business either.
     const writes = [
       ['/iflow/panel/conversations', 'GET'],
+      ['/iflow/panel/conversations/messages', 'POST'],
       ['/iflow/panel/conversations/accept', 'POST'],
       ['/iflow/panel/conversations/reject', 'POST'],
       ['/iflow/panel/conversation-workspace', 'POST'],

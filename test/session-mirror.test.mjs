@@ -15,6 +15,7 @@ import { describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
 const source = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
+const sessionSource = readFileSync(join(import.meta.dirname, '..', 'src', 'runtime', 'dsh-agent-runtime.ts'), 'utf8')
 
 const store = await import(
   pathToFileURL(join(import.meta.dirname, '..', 'src', 'conversation', 'store.ts')).href
@@ -33,8 +34,8 @@ describe('every path writes into the thread', () => {
   })
 
   it('records the sent prompt as this side and the answer as the peer', () => {
-    const [first] = source.split('mirrorExchange(outbound, [').slice(1)
-    const block = first.slice(0, 260)
+    const [first] = source.split('noteDelivery(outbound,').slice(1)
+    const block = first.slice(0, 600)
     assert.match(block, /side: 'self', messageId, text: args\.prompt/)
     assert.match(block, /side: 'peer'/)
   })
@@ -47,7 +48,8 @@ describe('every path writes into the thread', () => {
     // the second one is spelled: a test that matches the template string passes
     // whatever the value turns out to be, which is how it read `messageId` for
     // both halves and said nothing.
-    for (const block of source.split('mirrorExchange(outbound, [').slice(1)) {
+    for (const afterDelivery of source.split('noteDelivery(outbound,').slice(1)) {
+      const block = afterDelivery.split('mirrorExchange(outbound, [')[1]
       const entries = block.slice(0, block.indexOf('])'))
       // Both spellings: `messageId` as shorthand, and `messageId: <expr>`.
       // Matching only the explicit form found one entry and reported a
@@ -60,14 +62,15 @@ describe('every path writes into the thread', () => {
     }
   })
 
-  it('does not fail a send because there is nowhere to mirror to', () => {
-    // A node whose operator has not chosen a conversation folder yet. The
-    // exchange happened and is journalled; it simply has nowhere to be shown.
-    const mirror = source.slice(source.indexOf('async function mirrorExchange'))
-    const body = mirror.slice(0, mirror.indexOf('\n    async function'))
+  it('supports mandatory persistence before sending and best-effort mirroring of received replies', () => {
+    // New sends must persist first. An already-received reply must not be
+    // misreported as a network failure merely because its local view failed.
+    const mirror = sessionSource.slice(sessionSource.indexOf('async function mirrorExchange'))
+    const body = mirror.slice(0, mirror.indexOf('\n  async function'))
     assert.match(body, /catch \(err\)/)
     assert.match(body, /could not mirror into a session/)
-    assert.equal(/throw/.test(body), false, 'mirroring throws into the send path')
+    assert.match(body, /if \(strict\)/)
+    assert.match(body, /session_unavailable/)
   })
 })
 

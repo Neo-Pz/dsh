@@ -6,12 +6,12 @@
 
 | 目录 | 职责 | 是否直接编辑 |
 | --- | --- | --- |
-| `F:\i_Flow_One\iflow-dsh-plugin` | 唯一源仓和 `dev` 分支 | 是 |
+| `F:\i_Flow_One\iFO\iflow-dsh-plugin` | 唯一源仓和 `dev` 分支 | 是 |
 | `deepseek-harness\.local\plugins\iflow-dev` | `dev` 最新提交的 detached worktree | 否 |
 | `deepseek-harness\.local\plugins\iflow` | 已确认 tag 的 detached worktree | 否 |
 | `deepseek-harness\.iflow` | 身份、撤销记录和计价状态 | 仅由运行时写入 |
 | `%USERPROFILE%\.iflowone`（或 `IFLOWONE_HOME`） | 稳定 Principal Registry 与版本化 Authority 密钥 | 仅由身份流程写入 |
-| `F:\i_Flow_One\iflowone` | iFlow 核心包源码（已发布到 npm，构建不再需要它） | 是，但那是另一个仓库 |
+| `F:\i_Flow_One\iFO\iflow-connect` | iFlow 核心包源码（已发布到 npm，构建不再需要它） | 是，但那是另一个仓库 |
 
 `.local/` 和 `.iflow/` 由 `deepseek-harness/.git/info/exclude` 排除，不进入公共 Harness 仓库的状态或历史。
 
@@ -30,7 +30,7 @@
 
 ```powershell
 # 每次改完 TS 源码都要重新构建
-cd F:\i_Flow_One\iflow-dsh-plugin
+cd F:\i_Flow_One\iFO\iflow-dsh-plugin
 npm install                    # 首次，或依赖变动后
 node scripts\build.mjs
 npm test                       # 直接跑构建产物、迁移场景与真实 iflow-id
@@ -53,7 +53,7 @@ npm test                       # 直接跑构建产物、迁移场景与真实 i
 1. 在源仓修改 TypeScript 或 Rust 源码，并创建一个可回退的开发提交。
 
 ```powershell
-cd F:\i_Flow_One\iflow-dsh-plugin
+cd F:\i_Flow_One\iFO\iflow-dsh-plugin
 git add -A
 git commit -m "Describe the change"
 ```
@@ -91,8 +91,8 @@ curl http://127.0.0.1:<port>/iflow/projection/network
 ```
 
 7. 把 iFlowOne Web 接到这个边缘上。Web 应用在私有仓库 `iFlowOne-iFO` 里：在
-   `<iflowone-ifo>\apps\iflowone-web\.env` 设 `VITE_IFLOW_SOURCE=edge` 与
-   `VITE_IFLOW_EDGE_URL=http://127.0.0.1:<port>`，然后 `pnpm -C <iflowone-ifo> dev`，
+   `<iflowone-community>\apps\iflowone-web\.env` 设 `VITE_IFLOW_SOURCE=edge` 与
+   `VITE_IFLOW_EDGE_URL=http://127.0.0.1:<port>`，然后 `pnpm -C <iflowone-community> dev`，
    打开 `/agents` 与 `/network`。页头的徽标应从 `mock feed` 变成 `live edge`。
 
 ## 发布
@@ -100,7 +100,7 @@ curl http://127.0.0.1:<port>/iflow/projection/network
 1. 在源仓确认开发提交后创建版本 tag。
 
 ```powershell
-cd F:\i_Flow_One\iflow-dsh-plugin
+cd F:\i_Flow_One\iFO\iflow-dsh-plugin
 git tag -a v20.0.2 -m "Release v20.0.2"
 ```
 

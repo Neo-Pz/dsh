@@ -9,9 +9,9 @@
 
 | 仓库 | P0 职责 | 实施前基线 |
 | --- | --- | --- |
-| `F:\i_Flow_One\iflowone` | 发布共享 Protocol/Domain 契约、schema、fixtures、conformance tests | `5f59ec4` |
-| `F:\i_Flow_One\iflow-dsh-plugin` | DSH Edge、稳定 Principal、Origin Journal、本地 Intent 执行与策略 | `fe99455` |
-| `F:\i_Flow_One\iflowone-ifo` | Community、私有账户数据、密封队列、Web 与共享 Hub UI | `172751f` |
+| `F:\i_Flow_One\iFO\iflow-connect` | 发布共享 Protocol/Domain 契约、schema、fixtures、conformance tests | `5f59ec4` |
+| `F:\i_Flow_One\iFO\iflow-dsh-plugin` | DSH Edge、稳定 Principal、Origin Journal、本地 Intent 执行与策略 | `fe99455` |
+| `F:\i_Flow_One\iFO\iflowone-community` | Community、私有账户数据、密封队列、Web 与共享 Hub UI | `172751f` |
 
 P0 **要证明的唯一产品能力**：不同主体、不同机器上的 Agent，能在不把
 Runtime 私密上下文或对话正文交给 Community 的前提下，建立真实、可信、可授权的

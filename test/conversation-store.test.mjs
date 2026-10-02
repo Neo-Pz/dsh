@@ -9,11 +9,12 @@ import { describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
 const store = await import(
-  pathToFileURL(join(import.meta.dirname, '..', 'src', 'conversation', 'store.ts')).href
+  pathToFileURL(process.env.IFLOW_TEST_CONVERSATION_STORE || join(import.meta.dirname, '..', 'src', 'conversation', 'store.ts')).href
 )
 const {
   DEFAULT_TRUST,
   activateConversation,
+  collapseToCounterparties,
   bindSession,
   conversationsPath,
   decideDraft,
@@ -178,6 +179,76 @@ describe('the active Conversation pointer', () => {
     assert.equal(second.active, true)
     assert.equal(findActiveConversation(conversations, 'agent-local', 'agent-peer'), second)
     assert.ok(conversations['conv-1'], 'history remains locally addressable')
+  })
+})
+
+describe('same-name Agents keep separate private conversations', () => {
+  const pair = (id, extra = {}) => newConversation(id, {
+    localAgentId: 'coder', localAgentAuthorityDid: 'did:key:local-one',
+    peerAgentId: 'reviewer', peerAgentAuthorityDid: 'did:key:peer-one',
+    state: 'accepted', ...extra,
+  })
+  const own = { localAgentAuthorityDid: 'did:key:local-one' }
+  const exact = { ...own, peerAgentAuthorityDid: 'did:key:peer-one' }
+  const store = (...list) => Object.fromEntries(list.map((conversation) => [conversation.conversationId, conversation]))
+
+  it('keeps both remote identities in the counterparty list despite their same name', () => {
+    const first = pair('one')
+    const other = pair('two', { peerAgentAuthorityDid: 'did:key:peer-two' })
+    assert.equal(collapseToCounterparties(store(first, other), 'coder', own).length, 2)
+    assert.equal(findActiveConversation(store(first, other), 'coder', 'reviewer'), undefined)
+    assert.equal(findActiveConversation(store(first, other), 'coder', 'reviewer', own), undefined)
+    assert.equal(findActiveConversation(store(first, other), 'coder', 'reviewer', exact), first)
+    assert.equal(findActiveConversation(store(first, other), 'coder', 'reviewer', { ...own, peerAgentAuthorityDid: 'did:key:peer-two' }), other)
+  })
+
+  it('isolates a replacement local identity and filters lists to the selected own authority', () => {
+    const first = pair('one')
+    const replacement = pair('two', { localAgentAuthorityDid: 'did:key:local-two' })
+    assert.equal(collapseToCounterparties(store(first, replacement), 'coder').length, 2)
+    assert.deepEqual(collapseToCounterparties(store(first, replacement), 'coder', own).map((row) => row.conversationId), ['one'])
+    assert.equal(findActiveConversation(store(first, replacement), 'coder', 'reviewer'), undefined)
+    assert.equal(findActiveConversation(store(first, replacement), 'coder', 'reviewer', { peerAgentAuthorityDid: 'did:key:peer-one' }), undefined)
+    assert.equal(findActiveConversation(store(first, replacement), 'coder', 'reviewer', exact), first)
+  })
+
+  it('does not attach identity-less legacy history to a newly declared authority', () => {
+    const legacy = pair('legacy', { localAgentAuthorityDid: null, peerAgentAuthorityDid: null })
+    const current = pair('current')
+    const conversations = store(legacy, current)
+    assert.equal(collapseToCounterparties(conversations, 'coder').length, 2)
+    assert.equal(findActiveConversation(conversations, 'coder', 'reviewer'), undefined)
+    assert.equal(findActiveConversation(store(legacy), 'coder', 'reviewer', exact), undefined)
+    assert.deepEqual(collapseToCounterparties(conversations, 'coder', own), [current])
+    activateConversation(conversations, current)
+    assert.equal(legacy.active, true)
+    assert.equal(legacy.localAgentAuthorityDid, null)
+    assert.equal(legacy.peerAgentAuthorityDid, null)
+  })
+
+  it('moves only the pointer for the exact local and remote authorities', () => {
+    const old = pair('old')
+    const localOther = pair('local-other', { localAgentAuthorityDid: 'did:key:local-two' })
+    const peerOther = pair('peer-other', { peerAgentAuthorityDid: 'did:key:peer-two' })
+    const current = pair('current')
+    const conversations = store(old, localOther, peerOther, current)
+    activateConversation(conversations, current, exact)
+    assert.equal(old.active, false)
+    assert.equal(localOther.active, true)
+    assert.equal(peerOther.active, true)
+    assert.equal(current.active, true)
+    const before = JSON.stringify(conversations)
+    assert.throws(() => activateConversation(conversations, current, { ...exact, peerAgentAuthorityDid: 'did:key:peer-two' }), /conversation_mismatch/)
+    assert.equal(JSON.stringify(conversations), before)
+  })
+
+  it('keeps legacy name-based peer lookup compatible but refuses ambiguous authorities', () => {
+    const first = pair('one', { peer: 'reviewer-alias' })
+    const other = pair('two', { peer: 'reviewer-alias', peerAgentAuthorityDid: 'did:key:peer-two' })
+    assert.equal(findConversationWithPeer(store(first, other), 'coder', 'reviewer-alias'), undefined)
+    assert.equal(findConversationWithPeer(store(first, other), 'coder', 'reviewer-alias', exact), first)
+    const legacy = pair('legacy', { localAgentAuthorityDid: null, peerAgentAuthorityDid: null })
+    assert.equal(findConversationWithPeer(store(legacy), 'coder', 'reviewer', exact), undefined)
   })
 })
 

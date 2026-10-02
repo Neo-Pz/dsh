@@ -58,6 +58,37 @@ function Thread({ conversation, onBack }) {
   const [snapshot, setSnapshot] = React.useState(null)
   const [error, setError] = React.useState(null)
 
+  const [text, setText] = React.useState('')
+  const [mode, setMode] = React.useState('direct')
+  const [sending, setSending] = React.useState(false)
+  const [sendError, setSendError] = React.useState(null)
+  const [draft, setDraft] = React.useState(null)
+  const request = React.useRef(null)
+  const paused = conversation.communicationState === 'reauthorization_required'
+  const unavailable = paused || !conversation.localAgentId || !conversation.peerAgentId ||
+    conversation.state === 'closed' || conversation.state === 'rejected'
+
+  async function submit(decision) {
+    if (sending || (unavailable && decision !== 'cancel')) return
+    const payload = decision ? { draftId: draft.draftId, decision } : { text, mode }
+    const fingerprint = JSON.stringify(payload)
+    if (request.current?.fingerprint !== fingerprint) {
+      request.current = { fingerprint, messageId: `msg-${globalThis.crypto.randomUUID()}` }
+    }
+    setSending(true)
+    setSendError(null)
+    try {
+      const result = await api.sendConversation({ conversationId: conversation.conversationId, messageId: request.current.messageId, ...payload })
+      if (!result?.ok) throw new Error(result?.error || '发送未完成')
+      const pending = result.views?.find((view) => view.kind === 'conversation.draft')
+      setDraft(pending || null)
+      setText('')
+      request.current = null
+      await load()
+    } catch (err) { setSendError(err.message) }
+    finally { setSending(false) }
+  }
+
   const load = React.useCallback(async () => {
     try {
       const result = await api.conversationMessages(conversation.conversationId, undefined, PAGE)
@@ -102,6 +133,25 @@ function Thread({ conversation, onBack }) {
         ))}
       </ul>
       {error ? <div className="ifp-error">{error}</div> : null}
+      <form className="ifp-chat-compose" onSubmit={(event) => { event.preventDefault(); void submit() }}>
+        <p className="ifp-muted">From: {conversation.localAgentId || '未绑定 Agent'} → To: {conversation.peer || conversation.peerAgentId}</p>
+        <label>发送方式 <select aria-label="发送方式" value={mode} disabled={sending || !!draft || unavailable} onChange={(event) => setMode(event.target.value)}>
+          <option value="direct">Direct · 原文发送</option>
+          <option value="assisted">Delegate · 生成草稿后确认</option>
+        </select></label>
+        <textarea aria-label="聊天消息" rows={3} maxLength={16384} value={text}
+          placeholder="通过这条对话绑定的自己的 Agent 发送"
+          disabled={sending || !!draft || unavailable} onChange={(event) => setText(event.target.value)} />
+        <button className="ifp-btn" type="submit" disabled={sending || !!draft || unavailable || !text.trim()}>
+          {sending ? '处理中…' : mode === 'assisted' ? '生成草稿' : '发送'}
+        </button>
+      </form>
+      {draft ? <section className="ifp-chat-draft">
+        <p>Agent 草稿 · 确认前不会发送</p><div className="ifp-msg-body">{draft.text}</div>
+        <button className="ifp-btn" disabled={sending || unavailable} onClick={() => void submit('confirm')}>确认发送</button>
+        <button className="ifp-btn" disabled={sending} onClick={() => void submit('cancel')}>取消草稿</button>
+      </section> : null}
+      {sendError ? <div role="alert" className="ifp-error">{sendError}（未确认成功；重试沿用同一消息 ID）</div> : null}
     </Card>
   )
 }
@@ -136,7 +186,7 @@ export function ChatsTab() {
   }
 
   const open = conversations.find((c) => c.conversationId === openId)
-  if (open) return <Thread conversation={open} onBack={() => setOpenId(null)} />
+  if (open) return <Thread key={open.conversationId} conversation={open} onBack={() => setOpenId(null)} />
 
   // One row per counterparty. A list of who you talk to, not of every thread
   // that ever existed — the plugin already collapses them for the web view, and

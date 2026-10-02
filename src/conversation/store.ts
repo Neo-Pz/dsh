@@ -174,6 +174,9 @@ function normalize(id, value) {
       ? 'reauthorization_required'
       : 'active',
     binding: value.binding && typeof value.binding === 'object' ? value.binding : null,
+    routePeer: typeof value.routePeer === 'string' ? value.routePeer : null,
+    panelRequests: value.panelRequests && typeof value.panelRequests === 'object' && !Array.isArray(value.panelRequests) ? value.panelRequests : {},
+    sendRequests: value.sendRequests && typeof value.sendRequests === 'object' && !Array.isArray(value.sendRequests) ? value.sendRequests : {},
     pendingTask: value.pendingTask ?? null,
     preview: typeof value.preview === 'string' ? value.preview : '',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
@@ -182,6 +185,7 @@ function normalize(id, value) {
     outbound: Array.isArray(value.outbound) ? value.outbound.slice(-OUTBOUND_LIMIT) : [],
     deliveries: Array.isArray(value.deliveries) ? value.deliveries.slice(-DELIVERY_LIMIT) : [],
     drafts: Array.isArray(value.drafts) ? value.drafts.slice(-DRAFT_LIMIT) : [],
+    localDraftRuns: Array.isArray(value.localDraftRuns) ? value.localDraftRuns : [],
   }
 }
 
@@ -253,13 +257,33 @@ export function newConversation(id, {
  * A pair has an active pointer, not a permanent uniqueness constraint. An
  * explicit new Conversation closes only the pointer and preserves history.
  */
-export function findActiveConversation(conversations, localAgentId, peerAgentId) {
-  return Object.values(conversations).find((conversation) =>
+function conversationPairKey(conversation) {
+  return JSON.stringify([
+    conversation.localAgentId ?? null, conversation.localAgentAuthorityDid || null,
+    conversation.peerAgentId || conversation.peer || null, conversation.peerAgentAuthorityDid || null,
+  ])
+}
+
+function matchesExpectedAuthorities(conversation, expectedDIDs) {
+  return (expectedDIDs.localAgentAuthorityDid === undefined || conversation.localAgentAuthorityDid === expectedDIDs.localAgentAuthorityDid) &&
+    (expectedDIDs.peerAgentAuthorityDid === undefined || conversation.peerAgentAuthorityDid === expectedDIDs.peerAgentAuthorityDid)
+}
+
+/** A name alone may reuse one identity pair, never choose between authorities. */
+function unambiguousConversation(candidates) {
+  if (new Set(candidates.map(conversationPairKey)).size !== 1) return undefined
+  return candidates[0]
+}
+
+export function findActiveConversation(conversations, localAgentId, peerAgentId, expectedDIDs = {}) {
+  const candidates = Object.values(conversations).filter((conversation) =>
     conversation.active !== false &&
     conversation.localAgentId === localAgentId &&
     conversation.peerAgentId === peerAgentId &&
+    matchesExpectedAuthorities(conversation, expectedDIDs) &&
     conversation.state !== 'closed' && conversation.state !== 'rejected',
   )
+  return unambiguousConversation(candidates)
 }
 
 /**
@@ -275,14 +299,16 @@ export function findActiveConversation(conversations, localAgentId, peerAgentId)
  * those still match, because refusing to reuse them would leave exactly the
  * pile of duplicates this exists to prevent.
  */
-export function findConversationWithPeer(conversations, localAgentId, peer) {
+export function findConversationWithPeer(conversations, localAgentId, peer, expectedDIDs = {}) {
   if (!peer) return undefined
-  return Object.values(conversations).find((conversation) =>
+  const candidates = Object.values(conversations).filter((conversation) =>
     conversation.active !== false &&
     (conversation.peer === peer || conversation.peerAgentId === peer) &&
     (conversation.localAgentId == null || localAgentId == null || conversation.localAgentId === localAgentId) &&
+    matchesExpectedAuthorities(conversation, expectedDIDs) &&
     conversation.state !== 'closed' && conversation.state !== 'rejected',
   )
+  return unambiguousConversation(candidates)
 }
 
 /**
@@ -296,30 +322,33 @@ export function findConversationWithPeer(conversations, localAgentId, peer) {
  * A thread with no counterparty recorded is skipped rather than grouped under
  * a missing key, which would merge unrelated threads into one phantom row.
  */
-export function collapseToCounterparties(conversations, localAgentId) {
+export function collapseToCounterparties(conversations, localAgentId, expectedDIDs = {}) {
   const newest = new Map()
   for (const candidate of Object.values(conversations)) {
     if (candidate.localAgentId !== localAgentId) continue
+    if (!matchesExpectedAuthorities(candidate, expectedDIDs)) continue
     const counterparty = candidate.peerAgentId || candidate.peer
     if (!counterparty) continue
-    const held = newest.get(counterparty)
+    const pair = conversationPairKey(candidate)
+    const held = newest.get(pair)
     const liveNow = candidate.active !== false
     const liveHeld = held ? held.active !== false : false
     // Active wins outright; among equals, whichever spoke last.
     const better = !held
       || (liveNow && !liveHeld)
       || (liveNow === liveHeld && String(candidate.updatedAt) > String(held.updatedAt))
-    if (better) newest.set(counterparty, candidate)
+    if (better) newest.set(pair, candidate)
   }
   return [...newest.values()].sort((left, right) =>
     String(right.updatedAt).localeCompare(String(left.updatedAt)),
   )
 }
 
-export function activateConversation(conversations, conversation) {
+export function activateConversation(conversations, conversation, expectedDIDs = {}) {
+  if (!matchesExpectedAuthorities(conversation, expectedDIDs)) throw new Error('conversation_mismatch: the thread must belong to these exact Agent authorities')
   for (const candidate of Object.values(conversations)) {
     if (candidate.conversationId === conversation.conversationId) continue
-    if (candidate.localAgentId === conversation.localAgentId && candidate.peerAgentId === conversation.peerAgentId) {
+    if (conversationPairKey(candidate) === conversationPairKey(conversation)) {
       candidate.active = false
     }
   }

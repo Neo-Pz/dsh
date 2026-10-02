@@ -8,10 +8,10 @@
  * pointed at someone else's machine.
  */
 
-async function call(path, { method = 'GET', body } = {}) {
+async function call(path, { method = 'GET', body, headers = {} } = {}) {
   const response = await fetch(path, {
     method,
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
     // Never cache a control surface: a stale "you are publishing" is worse than
     // a slow one.
@@ -56,6 +56,9 @@ export const api = {
   conversations: () => call('/iflow/panel/conversations'),
   conversationMessages: (conversationId, cursor, limit) =>
     call('/iflow/panel/conversations/messages', { method: 'POST', body: { conversationId, cursor, limit } }),
+  sendConversation: (body) => call('/iflow/panel/conversations/send', {
+    method: 'POST', body, headers: { 'X-IFlow-Panel': 'chat' },
+  }),
   acceptConversation: (conversationId) =>
     call('/iflow/panel/conversations/accept', { method: 'POST', body: { conversationId } }),
   rejectConversation: (conversationId, reason) =>

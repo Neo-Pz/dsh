@@ -9,7 +9,7 @@ const {
   browserViewAad,
   intentAad,
   parseConversationIntent,
-} = await import(pathToFileURL(join(import.meta.dirname, '..', 'src', 'web', 'local-intents.ts')).href)
+} = await import(pathToFileURL(process.env.IFLOW_TEST_INTENT_PARSER || join(import.meta.dirname, '..', 'src', 'web', 'local-intents.ts')).href)
 
 const NOW = new Date('2026-08-25T12:00:00.000Z')
 
@@ -95,6 +95,13 @@ function harness({ plaintext = direct(), available = true, execute, postView } =
 }
 
 describe('Local Intent durability and authority boundary', () => {
+  it('preserves an exact peer authority on sync and rejects malformed authority', () => {
+    const input = { version: 1, kind: 'conversation.sync', ownAgentId: 'own-agent', peerAgentId: 'coder', peerAgentAuthorityDid: 'did:key:peer-a' }
+    assert.equal(parseConversationIntent(JSON.stringify(input)).peerAgentAuthorityDid, input.peerAgentAuthorityDid)
+    assert.throws(() => parseConversationIntent(JSON.stringify({ ...input, peerAgentAuthorityDid: 'node-alias' })), error => error.code === 'invalid_target')
+    assert.throws(() => parseConversationIntent(JSON.stringify({ ...input, peerAgentAuthorityDid: 7 })), error => error.code === 'invalid_peerAgentAuthorityDid')
+    assert.equal(parseConversationIntent(JSON.stringify({ ...input, peerAgentAuthorityDid: undefined })).peerAgentAuthorityDid, undefined)
+  })
   it('persists before ACK and rejects the same id under swapped routing', async () => {
     const { queue, store } = harness({ available: false })
     assert.deepEqual(await queue.accept([envelope()]), ['intent-1'])

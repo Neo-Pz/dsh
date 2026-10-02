@@ -24,7 +24,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
-const source = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8')
+const source = readFileSync(join(import.meta.dirname, '..', 'src', 'runtime', 'dsh-agent-runtime.ts'), 'utf8')
 
 describe('what gets written down', () => {
   it('records the peer on a message that came from the peer', () => {
@@ -50,7 +50,7 @@ describe('what gets written down', () => {
     // The moment one is derived from the other, a person on the far side is
     // either rendered on the wrong side or stops being marked as a person.
     const marker = source.slice(source.indexOf('function authorship('))
-    const body = marker.slice(0, marker.indexOf('\n    }'))
+    const body = marker.slice(0, marker.indexOf('\n  }'))
     assert.match(body, /author/)
     assert.match(body, /side/)
     assert.equal(/side\s*[:=]\s*[^,\n]*author/.test(body), false, 'side is computed from author')

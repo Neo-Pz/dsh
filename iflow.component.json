@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "componentId": "dsh-plugin",
+  "displayName": "iFlow DSH Plugin",
+  "role": "host-specific-plugin",
+  "hostPlatform": "DeepSeek Harness",
+  "currentDirectoryName": "iflow-dsh-plugin",
+  "currentGitRemote": "https://github.com/Neo-Pz/dsh.git",
+  "targetRepositoryName": "iflow-dsh-plugin",
+  "dependsOnComponents": ["connect"],
+  "sourceRoots": ["src", "rust"],
+  "packageNames": ["iflow-dsh-plugin"]
+}

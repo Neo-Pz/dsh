@@ -198,6 +198,10 @@ export const STYLES = `
    Left and right come from which side of the thread a message came from, never
    from who wrote it: a person on the far side belongs on the left. */
 .ifp-thread { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ifp-chat-compose { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; border-top: 1px solid #ddd; padding-top: 12px; }
+.ifp-chat-compose textarea { box-sizing: border-box; width: 100%; resize: vertical; font: inherit; padding: 10px; border: 1px solid #ccd; border-radius: 8px; }
+.ifp-chat-compose button { align-self: flex-end; }
+.ifp-chat-draft { margin-top: 12px; padding: 12px; border: 1px solid #ccd; border-radius: 8px; }
 .ifp-msg { max-width: 82%; border-radius: 10px; padding: 8px 11px; }
 .ifp-msg.theirs { align-self: flex-start; background: rgba(0,0,0,.035); }
 .ifp-msg.mine { align-self: flex-end; background: rgba(47,109,246,.09); }
